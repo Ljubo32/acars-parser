@@ -17,6 +17,7 @@ type Result struct {
 	Timestamp   string  `json:"timestamp"`
 	Tail        string  `json:"tail,omitempty"`
 	Time        string  `json:"time,omitempty"`
+	Flight      string  `json:"flight,omitempty"`
 	Waypoint    string  `json:"waypoint,omitempty"`
 	Latitude    float64 `json:"latitude"`
 	Longitude   float64 `json:"longitude"`
@@ -112,7 +113,7 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 			result.Track = track
 		}
 
-	case "waypoint_position":
+	case "waypoint_position", "waypoint_position_prefixed":
 		result.Waypoint = match.Captures["waypoint"]
 		result.Latitude = patterns.ParseDecimalCoord(match.Captures["lat"], match.Captures["lat_dir"])
 		result.Longitude = patterns.ParseDecimalCoord(match.Captures["lon"], match.Captures["lon_dir"])
@@ -135,6 +136,13 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 		// Parse track.
 		if track, err := strconv.Atoi(match.Captures["track"]); err == nil {
 			result.Track = track
+		}
+
+		// For prefixed format, extract and flatten the flight identifier.
+		// Flattening removes leading zeros (e.g., "007K" -> "7K") to match ACARS envelope format.
+		if airline := match.Captures["prefix_airline"]; airline != "" {
+			flightNum := match.Captures["prefix_flight"]
+			result.Flight = airline + strings.TrimLeft(flightNum, "0")
 		}
 
 	case "autpos":

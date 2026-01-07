@@ -31,13 +31,27 @@ var Formats = []patterns.Format{
 			`(?P<flight>\w+)`,
 		Fields: []string{"time", "altitude", "speed", "track", "lat_dir", "lat", "lon_dir", "lon", "flight"},
 	},
-	// Waypoint position format.
+	// Waypoint position format with M##A prefix.
+	// Format: M{seq:2}A{airline:2}{flight:4}{waypoint}  ,{coords}
+	// The M## portion appears to be a message sequence number (purpose unknown).
 	// Example: M47AQR8416NUPNI  ,N 34.901,E 100.595,41098,0477,2033,042\TS180219,311225
-	// Also: BEGLA  ,N 47.555,E 18.028,40025,490,1934,030\TS180357,311225
+	//          M## = sequence, A = identifier, QR = airline, 8416 = flight, NUPNI = waypoint
+	// Waypoints can be ICAO identifiers (2-5 chars) or lat/lon format (e.g., S15E090).
+	{
+		Name: "waypoint_position_prefixed",
+		Pattern: `^M(?P<msg_seq>\d{2})A(?P<prefix_airline>[A-Z0-9]{2})(?P<prefix_flight>[A-Z0-9]{4})` +
+			`(?P<waypoint>[A-Z][A-Z0-9]*)\s*,(?P<lat_dir>[NS])\s*(?P<lat>[\d.]+),` +
+			`(?P<lon_dir>[EW])\s*(?P<lon>[\d.]+),(?P<altitude>\d+),\s*(?P<ground_speed>\d+),` +
+			`(?P<eta>\d+),\s*(?P<track>\d+)`,
+		Fields: []string{"msg_seq", "prefix_airline", "prefix_flight", "waypoint", "lat_dir", "lat", "lon_dir", "lon", "altitude", "ground_speed", "eta", "track"},
+	},
+	// Plain waypoint position format (no M##A prefix).
+	// Example: BEGLA  ,N 47.555,E 18.028,40025,490,1934,030\TS180357,311225
+	// Waypoints are typically 2-5 letter ICAO identifiers, but some are numeric (e.g., 10000 on T932 near HKJK).
 	// Groups: waypoint, lat_dir, lat, lon_dir, lon, altitude, ground_speed, eta, track
 	{
 		Name: "waypoint_position",
-		Pattern: `^(?P<waypoint>\w+)\s*,(?P<lat_dir>[NS])\s*(?P<lat>[\d.]+),` +
+		Pattern: `^(?P<waypoint>[A-Z0-9]{2,8})\s*,(?P<lat_dir>[NS])\s*(?P<lat>[\d.]+),` +
 			`(?P<lon_dir>[EW])\s*(?P<lon>[\d.]+),(?P<altitude>\d+),\s*(?P<ground_speed>\d+),` +
 			`(?P<eta>\d+),\s*(?P<track>\d+)`,
 		Fields: []string{"waypoint", "lat_dir", "lat", "lon_dir", "lon", "altitude", "ground_speed", "eta", "track"},

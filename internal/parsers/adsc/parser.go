@@ -445,13 +445,13 @@ func decodeCoordinate(raw uint32) float64 {
 }
 
 // decodeAltitude decodes a 16-bit signed altitude value.
-// Resolution is 4 feet.
+// Resolution is 2 feet per bit (ARINC 745 / ED-100A basic report format).
 func decodeAltitude(raw uint32) int {
 	// Sign extend 16-bit value.
 	if raw&0x8000 != 0 {
 		raw |= 0xFFFF0000
 	}
-	return int(int32(raw)) * 4
+	return int(int32(raw)) * 2
 }
 
 // decodeHeading decodes a 12-bit signed heading/track value.
