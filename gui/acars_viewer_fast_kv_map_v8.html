@@ -643,16 +643,20 @@ function coordStr(lat, lon){
 
 
 function openMapAllFiltered(){
-  // Collect filtered points with coords
+  // Collect filtered rows that have either direct coords OR waypoint points
   const pts = [];
   for (const idx of filteredIdx){
     const r = rows[idx];
-    if (isNum(r.lat) && isNum(r.lon)){
+    const hasDirect = isNum(r.lat) && isNum(r.lon);
+    const hasWpts =
+      (r && r.raw && Array.isArray(r.raw.points) && r.raw.points.length) ||
+      (r && r.raw && Array.isArray(r.raw.results) && r.raw.results.some(x => x && Array.isArray(x.points) && x.points.length));
+    if (hasDirect || hasWpts){
       pts.push(r);
     }
   }
   if (!pts.length){
-    alert("Nema poruka sa koordinatama (u trenutnom filteru).");
+    alert("No points with coords or multi-waypoint (in current filter).");
     return;
   }
 
@@ -681,38 +685,165 @@ function openMapAllFiltered(){
     }).addTo(map);
   }
 
+  // Non-interactive pane for track lines (so lines never steal clicks)
+  if (!map.getPane('trackPane')){
+    map.createPane('trackPane');
+    map.getPane('trackPane').style.zIndex = 250;       // below markers
+    map.getPane('trackPane').style.pointerEvents = 'none'; // critical: no clicks
+  }
+
   // Clear single marker and previous layer
   if (marker) { try { marker.remove(); } catch(e) {} marker = null; }
   if (allLayer) { try { allLayer.remove(); } catch(e) {} allLayer = null; }
 
   allLayer = L.layerGroup().addTo(map);
 
-  // Add circle markers (small dots)
-  for (const r of pts){
-    const latlng = [r.lat, r.lon];
-    const cm = L.circleMarker(latlng, { radius: 4, weight: 1, fillOpacity: 0.8 });
-    const labelText = (r.tail || r.registration || '').trim();
-    if (labelText){
-      const ico = L.divIcon({
-        className: 'ptlabel',
-        html: `<span>${escapeHtml(labelText)}</span>`,
-        iconSize: [1,1],
-        iconAnchor: [-6, 6]
-      });
-      L.marker(latlng, {icon: ico, interactive: false}).addTo(allLayer);
+  // ---- Build non-clickable track polylines for H2 points per tail/reg ----
+  function tsToMs(ts){
+    if (ts === null || ts === undefined || ts === '') return 0;
+    if (typeof ts === 'number' && isFinite(ts)){
+      return ts < 1e12 ? ts * 1000 : ts;
     }
-    const popupHtml =
-      `<div style="max-width:560px">
-        <div class="nowrap"><b>${escapeHtml(r.tail || '')}</b> • ${escapeHtml(r.type || '')} • ${escapeHtml(r.label || '')}</div>
-        <div class="kvmini" style="margin:4px 0 8px 0">${escapeHtml(formatTimestamp(r.timestamp))} • ${escapeHtml(coordStr(r.lat, r.lon))}</div>
-        ${renderDetailsObject(r.raw)}
-       </div>`;
-    cm.bindPopup(popupHtml, {maxWidth: 9999, maxHeight: 9999, className: 'big-popup'});
-    cm.addTo(allLayer);
+    if (typeof ts === 'string'){
+      const s = ts.trim();
+      if (/^-?\d+(?:\.\d+)?$/.test(s)){
+        const n = Number(s);
+        return isFinite(n) ? (n < 1e12 ? n * 1000 : n) : 0;
+      }
+      const d = new Date(ts);
+      return isNaN(d.getTime()) ? 0 : d.getTime();
+    }
+    return 0;
+  }
+
+  function getWaypointsFromRow(r){
+    // Returns array of waypoint objects where lat/lon are inside.
+    if (!r || !r.raw) return [];
+    if (Array.isArray(r.raw.points) && r.raw.points.length) return r.raw.points;
+  
+    if (Array.isArray(r.raw.results)){
+      for (const it of r.raw.results){
+        if (it && Array.isArray(it.points) && it.points.length) return it.points;
+      }
+    }
+    return [];
+  }
+
+  const trackByTail = new Map(); // tail -> [{lat,lon,t,seq}]
+  for (const r of pts){
+    const tail = (r.tail || '').trim();
+    if (!tail) continue;
+
+    // Expect parsed H2 output: r.raw.points = [{latitude, longitude, ...}, ...]
+    const pArr = getWaypointsFromRow(r);
+    if (!pArr.length) continue;
+
+    const tms = tsToMs(r.timestamp);
+    for (let k=0; k<pArr.length; k++){
+      const p = pArr[k];
+      const lat = coerceNum(p && (p.latitude ?? p.lat));
+      const lon = coerceNum(p && (p.longitude ?? p.lon));
+      if (!(isNum(lat) && isNum(lon))) continue;
+
+      if (!trackByTail.has(tail)) trackByTail.set(tail, []);
+      trackByTail.get(tail).push({lat, lon, t: tms, seq: k});
+    }
+  }
+
+  // Draw one polyline per tail (sorted by message time, then point order in message)
+  for (const [tail, arr] of trackByTail.entries()){
+    if (arr.length < 2) continue;
+
+    arr.sort((a,b) => (a.t - b.t) || (a.seq - b.seq));
+
+    // Optional: dedupe consecutive identical points
+    const latlngs = [];
+    let prev = null;
+    for (const p of arr){
+      const cur = `${p.lat.toFixed(6)},${p.lon.toFixed(6)}`;
+      if (cur === prev) continue;
+      prev = cur;
+      latlngs.push([p.lat, p.lon]);
+    }
+    if (latlngs.length < 2) continue;
+
+    L.polyline(latlngs, {
+      pane: 'trackPane',
+      interactive: false,
+      bubblingMouseEvents: false,
+      weight: 2,
+      opacity: 0.7
+    }).addTo(allLayer);
+  }
+
+  // Add markers: (1) direct row coords if present, (2) all waypoints if present
+  for (const r of pts){
+    const tailLabel = (r.tail || r.registration || '').trim();
+  
+    // (1) direct coords marker (optional)
+    if (isNum(r.lat) && isNum(r.lon)){
+      const latlng = [r.lat, r.lon];
+      const cm = L.circleMarker(latlng, { radius: 4, weight: 1, fillOpacity: 0.8 });
+      const popupHtml =
+        `<div style="max-width:560px">
+          <div class="nowrap"><b>${escapeHtml(r.tail || '')}</b> • ${escapeHtml(r.type || '')} • ${escapeHtml(r.label || '')}</div>
+          <div class="kvmini" style="margin:4px 0 8px 0">${escapeHtml(formatTimestamp(r.timestamp))} • ${escapeHtml(coordStr(r.lat, r.lon))}</div>
+          ${renderDetailsObject(r.raw)}
+         </div>`;
+      cm.bindPopup(popupHtml, {maxWidth: 9999, maxHeight: 9999, className: 'big-popup'});
+      cm.addTo(allLayer);
+    }
+  
+    // (2) waypoint markers (multi-waypoint)
+    const wpts = getWaypointsFromRow(r);
+    if (wpts && wpts.length){
+      for (let k=0; k<wpts.length; k++){
+        const p = wpts[k];
+        const lat = coerceNum(p && (p.latitude ?? p.lat));
+        const lon = coerceNum(p && (p.longitude ?? p.lon));
+        if (!(isNum(lat) && isNum(lon))) continue;
+  
+        const latlng = [lat, lon];
+  
+        // smaller dot for waypoints
+        const cm = L.circleMarker(latlng, { radius: 3, weight: 1, fillOpacity: 0.85 });
+  
+        // label only on first waypoint to avoid clutter
+        if (tailLabel && k === 0){
+          const ico = L.divIcon({
+            className: 'ptlabel',
+            html: `<span>${escapeHtml(tailLabel)}</span>`,
+            iconSize: [1,1],
+            iconAnchor: [-6, 6]
+          });
+          L.marker(latlng, {icon: ico, interactive: false}).addTo(allLayer);
+        }
+  
+        // waypoint popup shows point fields too
+        const popupHtml =
+          `<div style="max-width:560px">
+            <div class="nowrap"><b>${escapeHtml(r.tail || '')}</b> • waypoint #${k+1} • ${escapeHtml(r.label || '')}</div>
+            <div class="kvmini" style="margin:4px 0 8px 0">${escapeHtml(formatTimestamp(r.timestamp))} • ${escapeHtml(coordStr(lat, lon))}</div>
+            ${renderDetailsObject(p)}
+           </div>`;
+        cm.bindPopup(popupHtml, {maxWidth: 9999, maxHeight: 9999, className: 'big-popup'});
+        cm.addTo(allLayer);
+      }
+    }
   }
 
   // Fit bounds
-  const bounds = L.latLngBounds(pts.map(r => [r.lat, r.lon]));
+  const allLatLngs = [];
+  for (const r of pts){
+    if (isNum(r.lat) && isNum(r.lon)) allLatLngs.push([r.lat, r.lon]);
+    const wpts = getWaypointsFromRow(r);
+    for (const p of wpts){
+      const lat = coerceNum(p && (p.latitude ?? p.lat));
+      const lon = coerceNum(p && (p.longitude ?? p.lon));
+      if (isNum(lat) && isNum(lon)) allLatLngs.push([lat, lon]);
+    }
+  }
+  const bounds = L.latLngBounds(allLatLngs);
   map.fitBounds(bounds.pad(0.15));
 
   setTimeout(() => { try { map.invalidateSize(); } catch(e) {} }, 60);
