@@ -153,8 +153,8 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 		data = data[:len(data)-2]
 		result.PayloadBytes = len(data)
 
-		// Decode ADS-C payload if present.
-		if result.MessageType == "ADS" && len(data) >= 3 {
+		// Decode ADS-C payload if present (but not for uplink messages - Label A6).
+		if result.MessageType == "ADS" && len(data) >= 3 && msg.Label != "A6" {
 			decodeADSCData(result, data)
 		}
 	}

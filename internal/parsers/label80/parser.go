@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"acars_parser/internal/acars"
+	"acars_parser/internal/airports"
 	"acars_parser/internal/patterns"
 	"acars_parser/internal/registry"
 )
@@ -20,6 +21,8 @@ type Result struct {
 	FlightNum   string  `json:"flight_num,omitempty"`
 	OriginICAO  string  `json:"origin_icao,omitempty"`
 	DestICAO    string  `json:"dest_icao,omitempty"`
+	OriginName  string  `json:"origin_name,omitempty"`
+	DestName    string  `json:"dest_name,omitempty"`
 	Latitude    float64 `json:"latitude,omitempty"`
 	Longitude   float64 `json:"longitude,omitempty"`
 	Altitude    int     `json:"altitude,omitempty"`
@@ -98,6 +101,8 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 			result.MsgType = match.Captures["msg_type"]
 			result.OriginICAO = match.Captures["origin"]
 			result.DestICAO = match.Captures["dest"]
+			result.OriginName = airports.GetName(result.OriginICAO)
+			result.DestName = airports.GetName(result.DestICAO)
 			result.Tail = strings.TrimPrefix(match.Captures["tail"], ".")
 			foundHeader = true
 
@@ -106,6 +111,8 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 				result.FlightNum = match.Captures["flight"]
 				result.OriginICAO = match.Captures["origin"]
 				result.DestICAO = match.Captures["dest"]
+				result.OriginName = airports.GetName(result.OriginICAO)
+				result.DestName = airports.GetName(result.DestICAO)
 				result.MsgType = "FLT"
 				foundHeader = true
 			}
@@ -156,7 +163,6 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 
 	return result
 }
-
 
 // parseLabel80Coord parses /POS coordinates that may be encoded as:
 // - decimal degrees with a dot: "44.038"

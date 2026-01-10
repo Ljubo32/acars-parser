@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"acars_parser/internal/acars"
+	"acars_parser/internal/airports"
 	"acars_parser/internal/patterns"
 	"acars_parser/internal/registry"
 )
@@ -56,19 +57,21 @@ type WindPoint struct {
 
 // Result represents a parsed H2 wind/weather report.
 type Result struct {
-	MsgID       int64       `json:"message_id"`
-	Timestamp   string      `json:"timestamp"`
-	Tail        string      `json:"tail,omitempty"`
-	Phase       string      `json:"phase,omitempty"` // 02A climb/descend, 02E cruise
-	Day         int         `json:"day,omitempty"`   // only for 02E (2-digit day)
-	Origin      string      `json:"origin,omitempty"`
-	Destination string      `json:"destination,omitempty"`
-	Latitude    float64     `json:"latitude,omitempty"`
-	Longitude   float64     `json:"longitude,omitempty"`
-	ReportTime  string      `json:"report_time,omitempty"`
-	WindLayers  []WindLayer `json:"wind_layers,omitempty"`
-	Points      []WindPoint `json:"points,omitempty"`
-	RawData     string      `json:"raw_data,omitempty"`
+	MsgID           int64       `json:"message_id"`
+	Timestamp       string      `json:"timestamp"`
+	Tail            string      `json:"tail,omitempty"`
+	Phase           string      `json:"phase,omitempty"` // 02A climb/descend, 02E cruise
+	Day             int         `json:"day,omitempty"`   // only for 02E (2-digit day)
+	Origin          string      `json:"origin,omitempty"`
+	Destination     string      `json:"destination,omitempty"`
+	OriginName      string      `json:"origin_name,omitempty"`
+	DestinationName string      `json:"destination_name,omitempty"`
+	Latitude        float64     `json:"latitude,omitempty"`
+	Longitude       float64     `json:"longitude,omitempty"`
+	ReportTime      string      `json:"report_time,omitempty"`
+	WindLayers      []WindLayer `json:"wind_layers,omitempty"`
+	Points          []WindPoint `json:"points,omitempty"`
+	RawData         string      `json:"raw_data,omitempty"`
 }
 
 func (r *Result) Type() string     { return "h2_wind" }
@@ -113,12 +116,14 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 	}
 
 	result := &Result{
-		MsgID:       int64(msg.ID),
-		Timestamp:   msg.Timestamp,
-		Tail:        msg.Tail,
-		Origin:      match.Captures["origin"],
-		Destination: match.Captures["dest"],
-		ReportTime:  match.Captures["time"],
+		MsgID:           int64(msg.ID),
+		Timestamp:       msg.Timestamp,
+		Tail:            msg.Tail,
+		Origin:          match.Captures["origin"],
+		Destination:     match.Captures["dest"],
+		OriginName:      airports.GetName(match.Captures["origin"]),
+		DestinationName: airports.GetName(match.Captures["dest"]),
+		ReportTime:      match.Captures["time"],
 	}
 
 	// Parse lat/lon. For H2, the common encoding is degrees * 1000

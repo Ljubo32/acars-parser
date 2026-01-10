@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"acars_parser/internal/acars"
+	"acars_parser/internal/airports"
 	"acars_parser/internal/patterns"
 	"acars_parser/internal/registry"
 )
@@ -38,16 +39,19 @@ type Result struct {
 	MsgID       int64         `json:"message_id"`
 	Timestamp   string        `json:"timestamp"`
 	Tail        string        `json:"tail,omitempty"`
-	MessageType string        `json:"message_type"` // "runway", "fb", "pos"
-	Airport     string        `json:"airport,omitempty"`
-	Runways     []RunwayInfo  `json:"runways,omitempty"`
-	Procedures  []string      `json:"procedures,omitempty"`
-	Latitude    float64       `json:"latitude,omitempty"`
-	Longitude   float64       `json:"longitude,omitempty"`
-	FlightLevel int           `json:"flight_level,omitempty"`
-	Origin      string        `json:"origin,omitempty"`
-	Destination string        `json:"destination,omitempty"`
-	Callsign    string        `json:"callsign,omitempty"`
+	MessageType     string        `json:"message_type"` // "runway", "fb", "pos"
+	Airport         string        `json:"airport,omitempty"`
+	AirportName     string        `json:"airport_name,omitempty"`
+	Runways         []RunwayInfo  `json:"runways,omitempty"`
+	Procedures      []string      `json:"procedures,omitempty"`
+	Latitude        float64       `json:"latitude,omitempty"`
+	Longitude       float64       `json:"longitude,omitempty"`
+	FlightLevel     int           `json:"flight_level,omitempty"`
+	Origin          string        `json:"origin,omitempty"`
+	Destination     string        `json:"destination,omitempty"`
+	OriginName      string        `json:"origin_name,omitempty"`
+	DestinationName string        `json:"destination_name,omitempty"`
+	Callsign        string        `json:"callsign,omitempty"``
 	ReportTime  string        `json:"report_time,omitempty"`
 	RawData     string        `json:"raw_data,omitempty"`
 }
@@ -125,6 +129,7 @@ func (p *Parser) parseRunwayInfo(msg *acars.Message, text string) *Result {
 		Tail:        msg.Tail,
 		MessageType: "runway",
 		Airport:     match.Captures["airport"],
+		AirportName: airports.GetName(match.Captures["airport"]),
 		Runways:     []RunwayInfo{},
 		Procedures:  []string{},
 	}
@@ -198,15 +203,17 @@ func (p *Parser) parseFBPosition(msg *acars.Message, text string) *Result {
 	}
 
 	result := &Result{
-		MsgID:       int64(msg.ID),
-		Timestamp:   msg.Timestamp,
-		Tail:        msg.Tail,
-		MessageType: "fb",
-		Airport:     match.Captures["airport"],
-		Callsign:    match.Captures["callsign"],
-		Destination: match.Captures["dest"],
-		ReportTime:  match.Captures["time"],
-		RawData:     match.Captures["unknown"], // Unknown field (INA03, INR03, etc.)
+		MsgID:           int64(msg.ID),
+		Timestamp:       msg.Timestamp,
+		Tail:            msg.Tail,
+		MessageType:     "fb",
+		Airport:         match.Captures["airport"],
+		AirportName:     airports.GetName(match.Captures["airport"]),
+		Callsign:        match.Captures["callsign"],
+		Destination:     match.Captures["dest"],
+		DestinationName: airports.GetName(match.Captures["dest"]),
+		ReportTime:      match.Captures["time"],
+		RawData:         match.Captures["unknown"], // Unknown field (INA03, INR03, etc.)
 	}
 
 	// Parse latitude.
@@ -240,13 +247,15 @@ func (p *Parser) parsePOSReport(msg *acars.Message, text string) *Result {
 	}
 
 	result := &Result{
-		MsgID:       int64(msg.ID),
-		Timestamp:   msg.Timestamp,
-		Tail:        msg.Tail,
-		MessageType: "pos",
-		Origin:      match.Captures["origin"],
-		Destination: match.Captures["dest"],
-		ReportTime:  match.Captures["time1"],
+		MsgID:           int64(msg.ID),
+		Timestamp:       msg.Timestamp,
+		Tail:            msg.Tail,
+		MessageType:     "pos",
+		Origin:          match.Captures["origin"],
+		OriginName:      airports.GetName(match.Captures["origin"]),
+		Destination:     match.Captures["dest"],
+		DestinationName: airports.GetName(match.Captures["dest"]),
+		ReportTime:      match.Captures["time1"],
 	}
 
 	// Parse latitude (format: DDMMD - 2 degree digits, tenths of minutes).
