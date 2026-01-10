@@ -17,10 +17,10 @@ import (
 
 // MeteoData contains meteorological information.
 type MeteoData struct {
-	WindSpeed      float64 `json:"wind_speed_kts"`       // Wind speed in knots.
-	WindDirection  float64 `json:"wind_direction_deg"`   // True wind direction in degrees.
-	WindDirInvalid bool    `json:"wind_dir_invalid"`     // True if wind direction is invalid.
-	Temperature    float64 `json:"temperature_c"`        // Temperature in Celsius.
+	WindSpeed      float64 `json:"wind_speed_kts"`     // Wind speed in knots.
+	WindDirection  float64 `json:"wind_direction_deg"` // True wind direction in degrees.
+	WindDirInvalid bool    `json:"wind_dir_invalid"`   // True if wind direction is invalid.
+	Temperature    float64 `json:"temperature_c"`      // Temperature in Celsius.
 }
 
 // EarthRef contains earth-referenced velocity data (ground track).
@@ -33,10 +33,10 @@ type EarthRef struct {
 
 // AirRef contains air-referenced velocity data (heading/mach).
 type AirRef struct {
-	Heading        float64 `json:"heading_deg"`      // True heading in degrees.
-	HeadingInvalid bool    `json:"heading_invalid"`  // True if heading is invalid.
-	Mach           float64 `json:"mach"`             // Mach number.
-	VertSpeed      int     `json:"vert_speed_fpm"`   // Vertical speed in ft/min.
+	Heading        float64 `json:"heading_deg"`     // True heading in degrees.
+	HeadingInvalid bool    `json:"heading_invalid"` // True if heading is invalid.
+	Mach           float64 `json:"mach"`            // Mach number.
+	VertSpeed      int     `json:"vert_speed_fpm"`  // Vertical speed in ft/min.
 }
 
 // Waypoint contains predicted waypoint data.
@@ -61,19 +61,19 @@ type ContractRequest struct {
 
 // Result represents a decoded ADS-C message (Label B6 or A6).
 type Result struct {
-	MsgID              int64             `json:"message_id"`
-	Timestamp          string            `json:"timestamp"`
-	Direction          string            `json:"direction,omitempty"` // "uplink" or "downlink"
-	FlightID           string            `json:"flight_id,omitempty"`
-	Registration       string            `json:"registration"`
-	GroundStation      string            `json:"ground_station,omitempty"`
-	GroundStationName  string            `json:"ground_station_name,omitempty"`
-	MessageType        string            `json:"message_type"`
-	PayloadBytes       int               `json:"payload_bytes"` // Length of decoded payload.
-	Latitude           float64           `json:"latitude,omitempty"`
-	Longitude          float64           `json:"longitude,omitempty"`
-	Altitude           int               `json:"altitude,omitempty"`
-	ContractRequest    *ContractRequest  `json:"contract_request,omitempty"``
+	MsgID             int64            `json:"message_id"`
+	Timestamp         string           `json:"timestamp"`
+	Direction         string           `json:"direction,omitempty"` // "uplink" or "downlink"
+	FlightID          string           `json:"flight_id,omitempty"`
+	Registration      string           `json:"registration"`
+	GroundStation     string           `json:"ground_station,omitempty"`
+	GroundStationName string           `json:"ground_station_name,omitempty"`
+	MessageType       string           `json:"message_type"`
+	PayloadBytes      int              `json:"payload_bytes"` // Length of decoded payload.
+	Latitude          float64          `json:"latitude,omitempty"`
+	Longitude         float64          `json:"longitude,omitempty"`
+	Altitude          int              `json:"altitude,omitempty"`
+	ContractRequest   *ContractRequest `json:"contract_request,omitempty"`
 
 	// Enhanced fields from tag parsing.
 	ReportTime     float64         `json:"report_time_sec,omitempty"` // Seconds past the hour.
@@ -169,14 +169,14 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 	}
 
 	// Extract clean registration from text prefix (chars 4-10, after "ADS.").
-	regPart := textPrefix[3:] // Skip "ADS".
+	regPart := textPrefix[3:]                // Skip "ADS".
 	regPart = strings.TrimLeft(regPart, ".") // Strip leading dots.
 	result.Registration = regPart
 	result.RawHex = hexPayload
 
 	// Strip CRC from payload before decoding.
 	data = data[:len(data)-2]
-	
+
 	// Handle uplink (Label A6) vs downlink (Label B6) differently.
 	if msg.Label == "A6" {
 		decodeUplinkPayload(result, data)
@@ -495,10 +495,10 @@ func decodeCoordinate(raw uint32) float64 {
 // Per ADS-C Basic Report encoding, altitude is (altitude_ft - 20000) with 2 ft resolution.
 // altitude_ft = signed(raw) * 2 + 20000.
 func decodeAltitude(raw uint32) int {
-    if raw&0x8000 != 0 {
-        raw |= 0xFFFF0000
-    }
-    return int(int32(raw))*2 + 20000
+	if raw&0x8000 != 0 {
+		raw |= 0xFFFF0000
+	}
+	return int(int32(raw))*2 + 20000
 }
 
 // decodeHeading decodes a 12-bit signed heading/track value.
