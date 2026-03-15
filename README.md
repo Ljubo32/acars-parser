@@ -40,19 +40,50 @@ acars_parser/
 │       ├── labelb2/        # Oceanic clearances (B2)
 │       ├── labelb3/        # Gate info (B3)
 │       ├── pdc/            # Pre-departure clearances
+│       ├── rep301/         # REP301 compact position reports
 │       └── sq/             # ARINC position (SQ)
 └── README.md
 ```
 
 ## Commands
 
+## GUI Viewer
+
+The standalone HTML viewer in [gui/acars_viewer_fast_kv_map_v8.html](gui/acars_viewer_fast_kv_map_v8.html) now supports a waypoint lookup table from [gui/Waypoints.txt](gui/Waypoints.txt). When the parsed JSON contains named waypoints without embedded coordinates, the viewer can resolve those names to latitude/longitude and plot them on the Leaflet map for FPN route waypoints and H1 PWI route-wind waypoint data.
+
+When `Waypoints.txt` contains multiple fixes with the same name in different regions, the viewer now keeps all candidates and chooses the most plausible coordinate using nearby route anchors instead of blindly taking the last duplicate. For H1 PWI route-wind data, repeated fixes across multiple flight levels are also merged into a single map marker popup that lists all available wind and temperature layers for that waypoint.
+
+When the viewer is served over HTTP from the `gui/` directory, it will try to load `Waypoints.txt` automatically. When the HTML file is opened directly from disk and the browser blocks sibling-file fetches, use the `Load Waypoints` picker in the viewer to load the same file manually.
+
 ### extract
 
-Extracts structured data from JSONL files containing ACARS messages.
+Extracts structured data from JSONL files and JAERO TXT logs containing ACARS messages.
 
 ```bash
 ./acars_parser extract -input messages.jsonl [-output output.json] [-pretty] [-all]
 ```
+
+The `extract` command autodetects JSONL and JAERO TXT input. For JAERO logs, the CLI converts each timestamped block into a normal ACARS message, keeps only the raw ACARS payload in `message.text`, preserves legitimate multiline payload text, strips JAERO line-wrap artefacts such as inserted `- #MD` continuations, and skips empty blocks.
+
+For AFN payloads that contain segments such as `/FMH<flight>` and `/FAK0,<destination>`, the extractor also infers the flight number, a clean tail fallback, and `destination_airport` directly from the raw message text before serialising the output JSON. It also infers the flight from FPN headers in the form `FPN/FN<flight>/...`, so values such as `FPN/FNSVA1047/...` populate `message.flight` in the emitted JSON.
+
+For PDC-style clearances, including label `A3` payloads such as `/...DC1/CLD ... ZSSS PDC ... CES239 CLRD TO VMMC ...`, the extractor also populates `message.flight`, `message.departing_airport`, and `message.destination_airport` from the raw clearance text.
+
+For label `A4` `FS1/FSM` payloads such as `/CDGATYA.FS1/FSM 0546 260314 LFPG SV0143 ...`, the extractor also populates `message.flight` and `message.departing_airport` from the raw message text. Two-character IATA airline prefixes continue to be normalised in the backend to their ICAO equivalents, so values such as `SV0143` become `SVA143` and `AY99` becomes `FIN99` in the emitted JSON.
+
+For CPDLC label `AA` and `BA` payloads, the backend now preserves richer structured element data for contact and monitor instructions, connection-management payloads, full facility names, facility designations, facility functions, frequencies, free-text elements, TP4 table values, and header timestamp seconds when present.
+
+For ADS-C label `A6` contract requests, the backend now decodes periodic reporting intervals from the actual request tag encoding instead of treating the third payload byte as a raw `* 64` modulus. This fixes periodic intervals such as `0xD9 -> 1664 seconds` and `0x00 -> 0 seconds`. The emitted `contract_request` JSON also now includes a `kind` and structured `groups` entries for periodic and event request tags such as reporting interval, report moduli, aircraft-intent projection time, lateral-deviation thresholds, vertical-speed thresholds, altitude ranges, and waypoint-change triggers.
+
+The ADS-C backend now also decodes air-reference Mach values with the correct 0.0005 Mach resolution. This fixes downlink displays where aircraft such as `9V-SKU` were previously shown at exactly double the real Mach value in the HTML viewer.
+
+In the HTML viewer, ADS-C label `B6` downlink messages now get the same expanded raw-text treatment as `A6`: instead of showing only the opaque hex block, the viewer renders a libacars-style indented text view built from the parsed ADS-C result, including the downlink type, basic report, flight IDs, airframe ID, earth-reference data, air-reference data, meteo data, and predicted route when those tags are present.
+
+For nested `dumphfdl` JSON lines carrying HFDL `hfnpdu` data types such as `Frequency data` or `Performance data`, the extractor now preserves a synthetic `HFDL` message when `hfnpdu.flight_id` and `hfnpdu.pos.lat/lon` are present. This allows such rows to survive extraction with `flight_id`, coordinates, ICAO address, and a parsed `hfdl_data` result that the HTML viewer can place on the map.
+
+The HTML viewer also gives `hfdl_data` rows a dedicated summary, parsed-details block, and map popup so `hfnpdu_type`, `flight_id`, ICAO address, ground station, synthetic HFDL text, and coordinates are readable without digging through the flattened raw JSON. On the map, direct HFDL points also use a distinct teal marker so they stand out from the generic ACARS position markers.
+
+When the input contains `message.flight` with a leading two-character IATA airline designator from the embedded mapping followed by digits, the emitted JSON normalises that value to the matching three-letter ICAO airline code. This includes alphanumeric designators such as `2C -> CMA` and `2G -> HUA`. The backend also strips leading zeros from the numeric part of `flight` values, so `AEE01BS` becomes `AEE1BS`. The `flight_id` field is preserved as received.
 
 **Options:**
 - `-input FILE` - Input JSONL file (default: stdin)
@@ -200,6 +231,15 @@ Extracts flight number, origin/destination, runway, SID, squawk code, and freque
 ### Route (5L)
 Parses route messages containing callsign, origin/destination airports (IATA/ICAO), and scheduling data.
 
+### Label 16 Position
+Parses classic waypoint position reports and `POSA` position reports with coordinates, flight level, waypoint ETAs, temperature, wind, fuel on board, and Mach number.
+
+### ILNGE7X Summary
+Parses `/ILNGE7X.` summary messages and extracts the tail, flight, take-off date/time, and origin-destination route.
+
+### REP301
+Parses compact `REP301` reports regardless of the ACARS label. Extracts the route, origin/destination, latitude/longitude, report time, flight level in tenths, temperature in Celsius, and wind direction/speed in knots and km/h.
+
 ### Position (80)
 Extracts current position (lat/lon), altitude, ground speed, and flight routing.
 
@@ -218,6 +258,18 @@ Extracts flight plan data including waypoints, origin/destination, and route inf
 
 ### H1 Position (H1 POS)
 Parses H1 position reports with current/next waypoint, altitude, and coordinates.
+
+### SB01 (H1)
+Parses compact `SB01` status messages carried on label `H1`. Extracts the registration, route, latitude/longitude, report time, altitude in feet and metres, temperature in Celsius, and wind direction/speed in knots and km/h.
+```
+SB0122BA_F-GZNG LFPOFMEE195 42703 0184101832 31001-550356015010GMY012015
+```
+
+### EB00 (H1)
+Parses compact `EB00` status messages carried on label `H1`. Extracts the aircraft registration, route, message number, latitude/longitude, report time, altitude in feet and metres, temperature in Celsius, and wind direction/speed in knots and km/h.
+```
+EB0032AA_ D-ABPR VABBEDDF 44 45570 0236890440 35998-633193015090W/X014022
+```
 
 ### PWI - Predicted Wind Information (H1)
 Extracts wind and temperature forecasts along the route:
@@ -294,10 +346,12 @@ Parses ETA and timing messages in various formats (ET, IR, B6, OS, C3).
 ```
 
 ### Label 15 - FST Reports (14k messages)
-Parses flight status reports with route, position, and temperature.
+Parses flight status reports with route, position, temperature, and FST01 fixed-layout wind and speed data.
 ```
 FST01EGLCEIDWN51420W00049317803270072M020C014331258256370
 ```
+
+For the space-delimited FST01 layout, the parser extracts the route, coordinates, flight level, temperature, wind direction, heading, track, and ground speed. Wind speed and ground speed are exposed via `wind_speed_kts` / `wind_speed_kmh` and `ground_speed_kts` / `ground_speed_kmh`, while the JSON output keeps the route as a single field instead of repeating separate origin and destination keys.
 
 ### Label 83 - Position Reports (3.6k messages)
 Parses PR and ZSPD position report formats.

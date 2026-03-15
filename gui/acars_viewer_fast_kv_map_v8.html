@@ -20,6 +20,9 @@
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { border-bottom: 1px solid #eee; padding: 8px 8px; vertical-align: top; }
   th { text-align: left; position: sticky; top: 0; background: #fafafa; z-index: 2; }
+  th.sortable { cursor: pointer; user-select: none; }
+  th.sortable:hover { background: #f1f4f8; }
+  th.sortable .sort-indicator { margin-left: 6px; color: #667085; font-size: 11px; }
   .main-table > tbody > tr:hover > td { background: #fcfcff; }
   .kvbox, .kvbox * { background-clip: padding-box; }
   code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12px; }
@@ -32,6 +35,17 @@
   .kvk { color: #9cd1ff; overflow-wrap: break-word; word-break: normal; white-space: normal; }
   .kvv { color: #e6edf3; overflow-wrap: break-word; word-break: normal; white-space: normal; }
   .kvmini { color:#b7c2cf; font-size: 12px; }
+  .tscell { min-width: 170px; }
+  .tsmain { white-space: nowrap; }
+  .leftmeta {
+    color: #111 !important;
+    font-size: 12px;
+    white-space: nowrap;
+    overflow-wrap: normal;
+    word-break: keep-all;
+    hyphens: none;
+  }
+  .metarow td { padding-top: 0; }
 
   /* Big Leaflet popups: 75% viewport */
     .leaflet-popup.big-popup .leaflet-popup-content-wrapper { width: auto; height: auto; max-width: 75vw; max-height: 75vh; }
@@ -123,6 +137,9 @@
   <div class="toprow">
     <span class="pill">Load JSON:</span>
     <input id="file" type="file" accept=".json,application/json">
+    <span class="pill">Load Waypoints:</span>
+    <input id="waypointsFile" type="file" accept=".txt,text/plain">
+    <span class="small muted" id="waypointStatus">Waypoint lookup: not loaded</span>
     <button id="showAllMap">Prikaži sve na mapi</button>
     <label class="cb small"><input id="lazyDetails" type="checkbox" checked> lazy details (recommended)</label>
   </div>
@@ -153,7 +170,8 @@
     <thead>
       <tr>
         <th style="width:170px">Timestamp</th>
-        <th style="width:120px">Tail/Reg</th>
+        <th id="thTail" class="sortable" style="width:120px">Tail/Reg<span class="sort-indicator"></span></th>
+        <th id="thFlight" class="sortable" style="width:130px">Flight<span class="sort-indicator"></span></th>
         <th style="width:90px">Label</th>
         <th style="width:130px">Type</th>
         <th style="width:110px">Coords</th>
@@ -182,6 +200,10 @@
 let rows = [];
 let filteredIdx = [];
 let page = 0;
+let sortState = { key: '', dir: 'asc' };
+let waypointLookup = new Map();
+let waypointLookupSource = '';
+let waypointRowCache = new WeakMap();
 
 // Map globals
 let map = null;
@@ -203,6 +225,103 @@ function coerceNum(x){
     }
   }
   return null;
+}
+
+function normaliseWaypointName(value){
+  return String(value || '').trim().toUpperCase();
+}
+
+function updateWaypointStatus(){
+  const el = document.getElementById('waypointStatus');
+  if (!el) return;
+  if (!waypointLookup.size){
+    el.textContent = 'Waypoint lookup: not loaded';
+    return;
+  }
+  const sourceText = waypointLookupSource ? ` (${waypointLookupSource})` : '';
+  el.textContent = `Waypoint lookup: ${waypointLookup.size} loaded${sourceText}`;
+}
+
+function setWaypointStatus(text){
+  const el = document.getElementById('waypointStatus');
+  if (!el) return;
+  el.textContent = String(text || '').trim() || 'Waypoint lookup: not loaded';
+}
+
+function parseWaypointLookupText(text){
+  const lookup = new Map();
+  const lines = String(text || '').split(/\r?\n/);
+  for (const line of lines){
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const parts = line.split(',');
+    if (parts.length < 3) continue;
+
+    const name = normaliseWaypointName(parts[0]);
+    const lat = coerceNum(parts[1]);
+    const lon = coerceNum(parts[2]);
+    if (!name || !isNum(lat) || !isNum(lon)) continue;
+    if (lat < -90 || lat > 90 || lon < -180 || lon > 180) continue;
+
+    const entry = {
+      name: String(parts[0] || '').trim(),
+      lat,
+      lon
+    };
+
+    if (!lookup.has(name)){
+      lookup.set(name, []);
+    }
+    lookup.get(name).push(entry);
+  }
+  return lookup;
+}
+
+function installWaypointLookup(lookup, sourceLabel){
+  waypointLookup = lookup instanceof Map ? lookup : new Map();
+  waypointLookupSource = String(sourceLabel || '').trim();
+  waypointRowCache = new WeakMap();
+  updateWaypointStatus();
+  if (rows.length){
+    recomputeFilterAndRender();
+  }
+}
+
+function getWaypointCandidatesByName(name){
+  const key = normaliseWaypointName(name);
+  return key ? (waypointLookup.get(key) || []) : [];
+}
+
+async function tryLoadDefaultWaypointLookup(){
+  const candidates = [];
+  try {
+    candidates.push(new URL('Waypoints.txt', window.location.href).href);
+  } catch (err) {
+    // Ignore malformed base URL edge cases.
+  }
+  candidates.push('./Waypoints.txt', 'Waypoints.txt');
+
+  for (const candidate of [...new Set(candidates)]){
+    try {
+      const response = await fetch(candidate);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const text = await response.text();
+      const lookup = parseWaypointLookupText(text);
+      if (lookup.size){
+        installWaypointLookup(lookup, 'Waypoints.txt');
+        return;
+      }
+    } catch (err) {
+      // Try the next candidate URL.
+    }
+  }
+
+  if (window.location.protocol === 'file:'){
+    setWaypointStatus('Waypoint lookup: browser blocks auto-load in file mode; use Load Waypoints or open via localhost');
+    return;
+  }
+
+  updateWaypointStatus();
 }
 
 
@@ -318,11 +437,126 @@ function extractCoords(obj){
 
   return walk(obj, 0);
 }
+function extractFlightDisplay(obj){
+  if (!obj || typeof obj !== 'object') return "";
+
+  const normaliseFlightCode = (value) => {
+    if (typeof value !== 'string') return "";
+    const trimmed = value.trim();
+    if (!trimmed) return "";
+
+    const match = trimmed.match(/^([A-Z-]+)(\d+)([A-Z]?)$/i);
+    if (!match) return trimmed;
+
+    const prefix = match[1];
+    const digits = String(parseInt(match[2], 10));
+    const suffix = match[3] || "";
+    return prefix + digits + suffix;
+  };
+
+  const formatPair = (flight, flightId) => {
+    const parts = [];
+    if (typeof flight === 'string' && flight.trim()) parts.push(normaliseFlightCode(flight));
+    if (typeof flightId === 'string' && flightId.trim()) parts.push(normaliseFlightCode(flightId));
+    return parts.join(' / ');
+  };
+
+  const direct = formatPair(obj.flight, obj.flight_id ?? obj.flightId ?? obj.adsc_flight_id);
+  if (direct) return direct;
+
+  const msg = obj.message;
+  if (msg && typeof msg === 'object'){
+    const nested = formatPair(msg.flight, msg.flight_id ?? msg.flightId);
+    if (nested) return nested;
+  }
+
+  return "";
+}
+
+function getFlightDisplayForRow(row){
+  if (!row || typeof row !== 'object') return '';
+  return extractFlightDisplay(row.raw || row) || row.flight || '';
+}
+
 function escapeHtml(s){
   return String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
 }
 
 function uniq(arr){ return [...new Set(arr)].sort(); }
+
+function sortValueText(value){
+  if (value === null || value === undefined) return '';
+  return String(value).trim();
+}
+
+function compareSortText(left, right){
+  const a = sortValueText(left);
+  const b = sortValueText(right);
+
+  const aEmpty = a === '';
+  const bEmpty = b === '';
+  if (aEmpty && bEmpty) return 0;
+  if (aEmpty) return 1;
+  if (bEmpty) return -1;
+
+  return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+}
+
+function applySort(){
+  if (!sortState.key) return;
+
+  const dir = sortState.dir === 'desc' ? -1 : 1;
+  filteredIdx.sort((leftIdx, rightIdx) => {
+    const left = rows[leftIdx];
+    const right = rows[rightIdx];
+
+    let cmp = 0;
+    if (sortState.key === 'tail'){
+      cmp = compareSortText(left && left.tail, right && right.tail);
+    } else if (sortState.key === 'flight'){
+      cmp = compareSortText(getFlightDisplayForRow(left), getFlightDisplayForRow(right));
+    }
+
+    if (cmp !== 0) return cmp * dir;
+    return leftIdx - rightIdx;
+  });
+}
+
+function updateSortHeaders(){
+  const headers = [
+    { id: 'thTail', key: 'tail' },
+    { id: 'thFlight', key: 'flight' }
+  ];
+
+  for (const header of headers){
+    const el = document.getElementById(header.id);
+    if (!el) continue;
+
+    const indicator = el.querySelector('.sort-indicator');
+    if (!indicator) continue;
+
+    if (sortState.key !== header.key){
+      indicator.textContent = '';
+      el.setAttribute('aria-sort', 'none');
+      continue;
+    }
+
+    indicator.textContent = sortState.dir === 'desc' ? '▼' : '▲';
+    el.setAttribute('aria-sort', sortState.dir === 'desc' ? 'descending' : 'ascending');
+  }
+}
+
+function toggleSort(key){
+  if (sortState.key === key){
+    sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    sortState.key = key;
+    sortState.dir = 'asc';
+  }
+
+  page = 0;
+  recomputeFilterAndRender();
+}
 
 function scheduleHeavy(fn){
   if ('requestIdleCallback' in window){
@@ -334,11 +568,16 @@ function scheduleHeavy(fn){
 
 function formatTimestamp(ts){
   if (ts === null || ts === undefined || ts === '') return '';
+
+  const toDisplayTimestamp = (date) => {
+    return date.toISOString().replace(/\.\d{3}Z$/, 'Z').replace('T',' ').replace('Z',' UTC');
+  };
+
   // ISO string?
   if (typeof ts === 'string'){
     const d = new Date(ts);
     if (!isNaN(d.getTime())){
-      return d.toISOString().replace('T',' ').replace('Z',' UTC');
+      return toDisplayTimestamp(d);
     }
     // numeric string?
     const s = ts.trim();
@@ -355,7 +594,7 @@ function formatTimestamp(ts){
     else if (ts >= 1e17) ms = ts / 1e6;
     const d = new Date(ms);
     if (!isNaN(d.getTime())){
-      return d.toISOString().replace('T',' ').replace('Z',' UTC');
+      return toDisplayTimestamp(d);
     }
   }
   return String(ts);
@@ -521,9 +760,10 @@ function normalizeInput(parsed){
     return parsed.map((it) => {
       const msg = it.message || {};
       const res = it.results || [];
-      const found = (Array.isArray(res) ? res.find(x => x && (x.message_type || x.msg_type)) : null) || {};
+      const found = (Array.isArray(res) ? res.find(x => x && (x.message_type || x.msg_type || x.hfnpdu_type)) : null) || {};
+      const inferredType = inferResultType(found, msg.label);
       const typ =
-        (found.message_type || found.msg_type) ||
+        inferredType ||
         (Array.isArray(res) && res.some(x => x && x.current_link) ? "link_mgmt" :
           (Array.isArray(res) && res.some(x => x && x.latitude !== undefined && x.longitude !== undefined) ? "pos_report" : "unknown"));
 
@@ -543,12 +783,14 @@ function normalizeInput(parsed){
       }
       return {
         timestamp: msg.timestamp ?? "",
+        manufacturerModel: msg.manufacturer_model ?? msg.manufacturerModel ?? msg.airframe?.manufacturer_model ?? msg.airframe?.manufacturerModel ?? "",
         tail: msg.tail || msg.reg || msg.registration || "",
+        flight: extractFlightDisplay(rawObj),
         label: String(msg.label || ""),
         type: String(typ || "unknown"),
         lat: lat,
         lon: lon,
-        summary: (msg.text || "").slice(0, 500),
+        summary: (buildHFDLSummary(rawObj) || (msg.text || "")).slice(0, 500),
         raw: rawObj
       };
     });
@@ -563,7 +805,7 @@ function normalizeInput(parsed){
       const lon = coerceNum(o.longitude !== undefined ? o.longitude : (o.lon !== undefined ? o.lon : null));
       const reg = o.registration || o.tail || "";
       const typ = o.message_type || o.type || "parsed";
-      const lbl = o.ground_station || o.label || "";
+      const lbl = o.label || (typ === 'hfdl_data' ? 'HFDL' : '');
       const summaryParts = [];
       if (o.adsc_flight_id) summaryParts.push(`FID ${o.adsc_flight_id}`);
       if (o.ground_station) summaryParts.push(`GS ${o.ground_station}`);
@@ -575,12 +817,14 @@ function normalizeInput(parsed){
       }
       return {
         timestamp: o.timestamp ?? "",
+        manufacturerModel: o.manufacturer_model ?? o.manufacturerModel ?? o.airframe?.manufacturer_model ?? o.airframe?.manufacturerModel ?? o.message?.airframe?.manufacturer_model ?? o.message?.airframe?.manufacturerModel ?? "",
         tail: reg,
+        flight: extractFlightDisplay(o),
         label: String(lbl || ""),
         type: String(typ || "parsed"),
         lat: lat2,
         lon: lon2,
-        summary: summaryParts.join(" • "),
+        summary: buildHFDLSummary(o) || summaryParts.join(" • "),
         raw: o
       };
     });
@@ -596,12 +840,14 @@ function normalizeInput(parsed){
     }
     return {
       timestamp: o.timestamp ?? "",
+      manufacturerModel: o.manufacturerModel ?? o.manufacturer_model ?? o.airframe?.manufacturer_model ?? o.airframe?.manufacturerModel ?? o.message?.airframe?.manufacturer_model ?? o.message?.airframe?.manufacturerModel ?? "",
       tail: o.tail || o.registration || "",
-      label: String(o.label || o.ground_station || ""),
+      flight: extractFlightDisplay(o.raw || o),
+      label: String(o.label || (String(o.type || o.message_type || '').trim() === 'hfdl_data' ? 'HFDL' : '') || ""),
       type: String(o.type || o.message_type || ""),
       lat: lat,
       lon: lon,
-      summary: (o.summary || o.text || "").slice(0, 500),
+      summary: (buildHFDLSummary(o.raw || o) || o.summary || o.text || "").slice(0, 500),
       raw: o.raw || o
     };
   });
@@ -638,16 +884,18 @@ function recomputeFilter(){
   const idx = [];
   for (let i=0; i<rows.length; i++){
     const r = rows[i];
+    const flightDisplay = getFlightDisplayForRow(r);
     if (onlyCoords && !(isNum(r.lat) && isNum(r.lon))) continue;
     if (lbl && r.label !== lbl) continue;
     if (typ && r.type !== typ) continue;
     if (q){
-      const hay = `${r.tail} ${r.label} ${r.type} ${r.summary}`.toLowerCase();
+      const hay = `${r.tail} ${flightDisplay} ${r.label} ${r.type} ${r.summary}`.toLowerCase();
       if (!hay.includes(q)) continue;
     }
     idx.push(i);
   }
   filteredIdx = idx;
+  applySort();
 }
 
 function pageSize(){
@@ -685,13 +933,26 @@ function makeDetailsCell(rowIndex){
   header.innerHTML = `<code>${escapeHtml(parts.join(" • "))}</code>`;
   wrap.appendChild(header);
 
+   const messageLabel = String(
+     r?.label ??
+     r?.raw?.message?.label ??
+     r?.raw?.label ??
+     ''
+   ).trim().toUpperCase();
+
   // Raw message text (preserve newlines). Extract from common locations.
   const rawText =
     (r && r.raw && r.raw.message && (r.raw.message.text ?? r.raw.message.msg_text)) ??
     (r && r.raw && (r.raw.text ?? r.raw.msg_text)) ??
     "";
-  // Show raw text block only when message contains newlines (CR/LF)
-  if (rawText && /[\r\n]/.test(String(rawText))){
+   const displayRawText = getDisplayRawText(r, messageLabel, rawText);
+   const showRawText = displayRawText && (
+     messageLabel === 'AA' ||
+     messageLabel === 'A6' ||
+     messageLabel === 'B6' ||
+     /[\r\n]/.test(String(displayRawText))
+   );
+   if (showRawText){
     const detRaw = document.createElement('details');
     const sumRaw = document.createElement('summary');
     sumRaw.textContent = 'raw text';
@@ -699,7 +960,7 @@ function makeDetailsCell(rowIndex){
 
     const pre = document.createElement('pre');
     pre.className = 'rawtext';
-    pre.textContent = String(rawText);
+    pre.textContent = String(displayRawText);
     detRaw.appendChild(pre);
 
     wrap.appendChild(detRaw);
@@ -726,7 +987,7 @@ function makeDetailsCell(rowIndex){
 
     const renderNow = () => {
       try {
-        placeholder.outerHTML = renderDetailsObject(r.raw);
+        placeholder.outerHTML = renderPreferredDetailsObject(r);
       } catch(e){
         placeholder.textContent = String(e);
       }
@@ -738,43 +999,1007 @@ function makeDetailsCell(rowIndex){
   return wrap;
 }
 
+function getDisplayRawText(row, messageLabel, rawText){
+  const raw = String(rawText || '').trimEnd();
+  if (messageLabel !== 'AA' && messageLabel !== 'A6' && messageLabel !== 'B6') return raw;
+
+  const results = Array.isArray(row?.raw?.results) ? row.raw.results : [];
+
+  const cpdlc = results.find((it) => it && (
+    it.message_type === 'cpdlc' ||
+    it.message_type === 'connect_request' ||
+    it.message_type === 'connect_confirm' ||
+    it.message_type === 'disconnect'
+  ));
+  const adsc = results.find((it) => {
+    if (!it || typeof it !== 'object') return false;
+    if (String(it.message_type || '').startsWith('uplink_')) return true;
+    if (messageLabel === 'B6') {
+      return String(it.direction || '').trim().toLowerCase() === 'downlink';
+    }
+    if (messageLabel !== 'A6') return false;
+
+    const rawHex = String(it.raw_hex || '').trim();
+    const direction = String(it.direction || '').trim().toLowerCase();
+    return rawHex !== '' && direction === 'uplink';
+  });
+
+  const expanded = formatCPDLCRawText(raw, cpdlc);
+  if (expanded) return expanded;
+
+  const expandedADSC = formatADSCRawText(raw, adsc);
+  if (expandedADSC) return expandedADSC;
+
+  return expanded || raw;
+}
+
+function formatCPDLCRawText(rawText, cpdlc){
+  if (!cpdlc || typeof cpdlc !== 'object') return '';
+
+  const lines = [];
+  if (rawText) {
+    lines.push(rawText, '');
+  }
+
+  lines.push(cpdlcTitle(cpdlc));
+  lines.push(cpdlc.direction === 'downlink' ? ' CPDLC Downlink Message:' : ' CPDLC Uplink Message:');
+
+  const headerLines = [];
+  if (cpdlc.header && typeof cpdlc.header === 'object') {
+    if (cpdlc.header.msg_id !== undefined && cpdlc.header.msg_id !== null && cpdlc.header.msg_id !== '') {
+      headerLines.push(`   Msg ID: ${cpdlc.header.msg_id}`);
+    }
+    if (cpdlc.header.timestamp && typeof cpdlc.header.timestamp === 'object') {
+      const hours = cpdlc.header.timestamp.hours;
+      const minutes = cpdlc.header.timestamp.minutes;
+      const seconds = cpdlc.header.timestamp.seconds;
+      if (Number.isFinite(hours) && Number.isFinite(minutes)) {
+        let timestamp = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+        if (Number.isFinite(seconds)) {
+          timestamp += `:${String(seconds).padStart(2, '0')}`;
+        }
+        headerLines.push(`   Timestamp: ${timestamp}`);
+      }
+    }
+  }
+  if (headerLines.length) {
+    lines.push('  Header:', ...headerLines);
+  }
+
+  const elementLines = [];
+  if (Array.isArray(cpdlc.elements) && cpdlc.elements.length) {
+    for (const element of cpdlc.elements) {
+      const label = String(element?.label || '').trim() || '[element]';
+      elementLines.push(`   ${label}`);
+
+      const detailLines = formatCPDLCRawElementDetails(element);
+      if (detailLines.length) {
+        for (const line of detailLines) {
+          elementLines.push(`    ${line}`);
+        }
+        continue;
+      }
+
+      const text = String(element?.text ?? element?.data?.text ?? '').trim();
+      if (text && text !== label) {
+        elementLines.push(`    ${text}`);
+      }
+    }
+  } else if (typeof cpdlc.formatted_text === 'string' && cpdlc.formatted_text.trim()) {
+    elementLines.push('   [formatted_text]');
+    elementLines.push(`    ${cpdlc.formatted_text.trim()}`);
+  }
+
+  if (elementLines.length) {
+    lines.push('  Message data:', ...elementLines);
+  }
+
+  return lines.join('\n').trim();
+}
+
+function formatCPDLCRawElementDetails(element){
+  const data = element?.data;
+  if (!data || typeof data !== 'object') return [];
+
+  const lines = [];
+  const label = String(element?.label || '').trim();
+  const text = String(data.text || '').trim();
+
+  const positionName = String(data?.position?.name || '').trim();
+  if (positionName) {
+    lines.push(`Fix: ${positionName}`);
+  }
+
+  const altitudeType = String(data.type || '').trim().toLowerCase();
+  const altitudeValue = Number(data.value);
+  if (Number.isFinite(altitudeValue)) {
+    if (altitudeType === 'flight_level') {
+      lines.push(`Flight level: ${altitudeValue}`);
+    } else if (altitudeType === 'feet') {
+      lines.push(`Altitude: ${altitudeValue} ft`);
+    } else if (altitudeType === 'meters') {
+      lines.push(`Altitude: ${altitudeValue} m`);
+    }
+  }
+
+  const unit = String(data.unit || '').trim();
+  if (unit) {
+    lines.push(`Facility Name: ${unit}`);
+  }
+
+  const unitType = String(data.unit_type || '').trim();
+  if (unitType) {
+    lines.push(`Facility function: ${unitType}`);
+  }
+
+  const frequencyType = String(data?.frequency?.type || '').trim().toLowerCase();
+  const frequencyValue = Number(data?.frequency?.value);
+  if (Number.isFinite(frequencyValue)) {
+    const prefix = frequencyType ? `${frequencyType.toUpperCase()}: ` : 'Frequency: ';
+    let suffix = '';
+    if (frequencyType === 'vhf' || frequencyType === 'uhf') {
+      suffix = ' MHz';
+    } else if (frequencyType === 'hf') {
+      suffix = ' kHz';
+    }
+    lines.push(`${prefix}${frequencyValue.toFixed(3)}${suffix}`.trim());
+  }
+
+  const timeHours = data?.time?.hours;
+  const timeMinutes = data?.time?.minutes;
+  const timeSeconds = data?.time?.seconds;
+  if (Number.isFinite(timeHours) && Number.isFinite(timeMinutes)) {
+    let timeText = `${String(timeHours).padStart(2, '0')}:${String(timeMinutes).padStart(2, '0')}`;
+    if (Number.isFinite(timeSeconds)) {
+      timeText += `:${String(timeSeconds).padStart(2, '0')}`;
+    }
+    lines.push(`Time: ${timeText}`);
+  }
+
+  const beaconCode = String(data.code || '').trim();
+  if (beaconCode) {
+    lines.push(`Code: ${beaconCode}`);
+  }
+
+  const facilityDesignation = String(data.facility_designation || '').trim();
+  if (facilityDesignation) {
+    lines.push(`Facility designation: ${facilityDesignation}`);
+  }
+
+  const tp4Table = String(data.tp4_table || '').trim();
+  if (tp4Table) {
+    lines.push(`TP4 table: ${tp4Table}`);
+  }
+
+  const routeInformation = Array.isArray(data?.route_clearance?.route_information) ? data.route_clearance.route_information : [];
+  const airwayIntercept = String(data?.route_clearance?.airway_intercept || '').trim();
+  const routeInfoAdditional = String(data?.route_clearance?.route_info_additional || '').trim();
+  if (airwayIntercept || routeInformation.length || routeInfoAdditional) {
+    lines.push('Route:');
+    if (airwayIntercept) {
+      lines.push(` Airway ID: ${airwayIntercept}`);
+    }
+    for (const routeItem of routeInformation) {
+      const value = String(routeItem || '').trim();
+      if (value) {
+        lines.push(` Airway ID: ${value}`);
+      }
+    }
+    if (routeInfoAdditional) {
+      lines.push(` Additional: ${routeInfoAdditional}`);
+    }
+  }
+
+  if (text) {
+    if (label === '[freetext]') {
+      lines.push(text);
+    } else if (text !== label) {
+      lines.push(text);
+    }
+  }
+
+  return lines;
+}
+
+function cpdlcTitle(cpdlc){
+  const messageType = String(cpdlc?.message_type || '').trim().toLowerCase();
+  switch (messageType) {
+    case 'connect_request':
+      return 'FANS-1/A CPDLC Connect Request:';
+    case 'connect_confirm':
+      return 'FANS-1/A CPDLC Connect Confirm:';
+    case 'disconnect':
+      return 'FANS-1/A CPDLC Disconnect Request:';
+    default:
+      return 'FANS-1/A CPDLC Message:';
+  }
+}
+
+function formatADSCRawText(rawText, adsc){
+  if (!adsc || typeof adsc !== 'object') return '';
+
+  const direction = String(adsc.direction || '').trim().toLowerCase();
+  if (direction === 'downlink') {
+    return formatADSCDownlinkText(rawText, adsc);
+  }
+
+  const request = parseADSCUplinkRequest(adsc);
+  if (!request) return '';
+
+  const lines = [];
+  if (rawText) {
+    lines.push(rawText, '');
+  }
+
+  lines.push('ADS-C message:');
+  if (request.kind === 'terminate') {
+    lines.push(' Cancel all contracts and terminate connection');
+    return lines.join('\n').trim();
+  }
+  if (request.kind === 'cancel') {
+    lines.push(' Cancel contract:');
+    if (Number.isFinite(request.contractNum)) {
+      lines.push(`  Contract number: ${request.contractNum}`);
+    }
+    return lines.join('\n').trim();
+  }
+  if (request.kind === 'cancel_emergency') {
+    lines.push(' Cancel emergency mode:');
+    if (Number.isFinite(request.contractNum)) {
+      lines.push(`  Contract number: ${request.contractNum}`);
+    }
+    return lines.join('\n').trim();
+  }
+
+  lines.push(adsContractTitle(request.kind));
+
+  if (Number.isFinite(request.contractNum)) {
+    lines.push(`  Contract number: ${request.contractNum}`);
+  }
+
+  if ((request.kind === 'periodic' || request.kind === 'emergency_periodic') && Number.isFinite(request.intervalSecs) && request.intervalSecs >= 0) {
+    lines.push(`  Reporting interval: ${request.intervalSecs} seconds`);
+  }
+
+  for (const item of request.items) {
+    lines.push(`  ${item}`);
+  }
+
+  return lines.join('\n').trim();
+}
+
+function formatADSCDownlinkText(rawText, adsc){
+  const lines = [];
+  if (rawText) {
+    lines.push(rawText, '');
+  }
+
+  lines.push('ADS-C message:');
+  lines.push(' Downlink message:');
+
+  const messageTypeLine = formatADSCDownlinkType(adsc);
+  if (messageTypeLine) {
+    lines.push(`  ${messageTypeLine}`);
+  }
+
+  const headerLines = formatADSCDownlinkHeaderLines(adsc);
+  if (headerLines.length) {
+    lines.push('  Header:', ...headerLines.map((line) => `   ${line}`));
+  }
+
+  const basicLines = formatADSCDownlinkBasicLines(adsc);
+  if (basicLines.length) {
+    lines.push('  Basic report:', ...basicLines.map((line) => `   ${line}`));
+  }
+
+  const additionalSections = [
+    ['Flight ID data', formatADSCDownlinkFlightIDLines(adsc)],
+    ['Airframe ID data', formatADSCDownlinkAirframeLines(adsc)],
+    ['Earth reference data', formatADSCDownlinkEarthRefLines(adsc)],
+    ['Air reference data', formatADSCDownlinkAirRefLines(adsc)],
+    ['Meteo data', formatADSCDownlinkMeteoLines(adsc)],
+    ['Predicted route', formatADSCDownlinkPredictedRouteLines(adsc)]
+  ];
+
+  for (const [title, sectionLines] of additionalSections) {
+    if (!sectionLines.length) continue;
+    lines.push(`  ${title}:`, ...sectionLines.map((line) => `   ${line}`));
+  }
+
+  return lines.join('\n').trim();
+}
+
+function formatADSCDownlinkType(adsc){
+  switch (String(adsc?.message_type || '').trim().toLowerCase()) {
+    case 'basic':
+      return 'Basic report';
+    case 'emergency':
+      return 'Emergency basic report';
+    case 'lateral_deviation':
+      return 'Lateral deviation event';
+    case 'vert_rate_change':
+      return 'Vertical rate change event';
+    case 'altitude_range':
+      return 'Altitude range event';
+    case 'waypoint_change':
+      return 'Waypoint change event';
+    case 'acknowledgment':
+      return 'Acknowledgment';
+    case 'nack':
+      return 'Negative acknowledgment';
+    case 'noncompliance':
+      return 'Noncompliance notification';
+    case 'cancel_emergency':
+      return 'Cancel emergency mode';
+    default:
+      return String(adsc?.message_type || '').trim();
+  }
+}
+
+function formatADSCDownlinkHeaderLines(adsc){
+  const lines = [];
+  const flightId = String(adsc?.flight_id || '').trim();
+  const adscFlightId = String(adsc?.adsc_flight_id || '').trim();
+  const registration = String(adsc?.registration || '').trim();
+  const groundStation = String(adsc?.ground_station || '').trim();
+  const groundStationName = String(adsc?.ground_station_name || '').trim();
+  const payloadBytes = Number(adsc?.payload_bytes);
+
+  if (flightId) lines.push(`Flight ID: ${flightId}`);
+  if (registration) lines.push(`Registration: ${registration}`);
+  if (groundStation) {
+    lines.push(`Ground station: ${groundStationName ? `${groundStation} (${groundStationName})` : groundStation}`);
+  }
+  if (adscFlightId && adscFlightId !== flightId) lines.push(`ADS-C flight ID: ${adscFlightId}`);
+  if (Number.isFinite(payloadBytes) && payloadBytes > 0) lines.push(`Payload bytes: ${payloadBytes}`);
+  return lines;
+}
+
+function formatADSCDownlinkBasicLines(adsc){
+  const lines = [];
+  const latitude = coerceNum(adsc?.latitude);
+  const longitude = coerceNum(adsc?.longitude);
+  const altitude = coerceNum(adsc?.altitude);
+  const reportTime = coerceNum(adsc?.report_time_sec);
+  const accuracy = coerceNum(adsc?.accuracy);
+
+  if (isNum(latitude) && isNum(longitude)) {
+    lines.push(`Position: ${formatADSCPosition(latitude, longitude)}`);
+  }
+  if (isNum(altitude)) {
+    lines.push(`Altitude: ${Math.round(altitude)} ft`);
+  }
+  if (isNum(reportTime)) {
+    lines.push(`Report time: ${formatADSReportTime(reportTime)} UTC`);
+  }
+  if (isNum(accuracy)) {
+    lines.push(`Accuracy: ${Math.round(accuracy)}`);
+  }
+  if (adsc?.nav_redundancy !== undefined) {
+    lines.push(`NAV redundancy: ${adsc.nav_redundancy ? 'available' : 'not available'}`);
+  }
+  if (adsc?.tcas_available !== undefined) {
+    lines.push(`TCAS: ${adsc.tcas_available ? 'available' : 'not available'}`);
+  }
+  return lines;
+}
+
+function formatADSCDownlinkFlightIDLines(adsc){
+  const value = String(adsc?.adsc_flight_id || '').trim();
+  return value ? [`Flight ID: ${value}`] : [];
+}
+
+function formatADSCDownlinkAirframeLines(adsc){
+  const value = String(adsc?.airframe_id || '').trim();
+  return value ? [`ICAO: ${value}`] : [];
+}
+
+function formatADSCDownlinkEarthRefLines(adsc){
+  const earthRef = adsc?.earth_ref;
+  if (!earthRef || typeof earthRef !== 'object') return [];
+
+  const lines = [];
+  const track = coerceNum(earthRef.track_deg);
+  const groundSpeed = coerceNum(earthRef.ground_speed_kts);
+  const vertSpeed = coerceNum(earthRef.vert_speed_fpm);
+
+  if (earthRef.track_invalid) lines.push('True track: invalid');
+  else if (isNum(track)) lines.push(`True track: ${Math.round(track)}°`);
+  if (isNum(groundSpeed)) lines.push(`Ground speed: ${formatCompactNumber(groundSpeed, 1)} kt`);
+  if (isNum(vertSpeed)) lines.push(`Vertical speed: ${Math.round(vertSpeed)} ft/min`);
+  return lines;
+}
+
+function formatADSCDownlinkAirRefLines(adsc){
+  const airRef = adsc?.air_ref;
+  if (!airRef || typeof airRef !== 'object') return [];
+
+  const lines = [];
+  const heading = coerceNum(airRef.heading_deg);
+  const mach = coerceNum(airRef.mach);
+  const vertSpeed = coerceNum(airRef.vert_speed_fpm);
+
+  if (airRef.heading_invalid) lines.push('True heading: invalid');
+  else if (isNum(heading)) lines.push(`True heading: ${Math.round(heading)}°`);
+  if (isNum(mach)) lines.push(`Mach: ${formatCompactNumber(mach, 3)}`);
+  if (isNum(vertSpeed)) lines.push(`Vertical speed: ${Math.round(vertSpeed)} ft/min`);
+  return lines;
+}
+
+function formatADSCDownlinkMeteoLines(adsc){
+  const meteo = adsc?.meteo;
+  if (!meteo || typeof meteo !== 'object') return [];
+
+  const lines = [];
+  const windSpeed = coerceNum(meteo.wind_speed_kts);
+  const windDirection = coerceNum(meteo.wind_direction_deg);
+  const temperature = coerceNum(meteo.temperature_c);
+
+  if (isNum(windSpeed)) {
+    const windText = meteo.wind_dir_invalid || !isNum(windDirection)
+      ? `${formatCompactNumber(windSpeed, 1)} kt`
+      : `${Math.round(windDirection)}° / ${formatCompactNumber(windSpeed, 1)} kt`;
+    lines.push(`Wind: ${windText}`);
+  }
+  if (isNum(temperature)) {
+    lines.push(`Temperature: ${formatCompactNumber(temperature, 1)} C`);
+  }
+  return lines;
+}
+
+function formatADSCDownlinkPredictedRouteLines(adsc){
+  const predictedRoute = adsc?.predicted_route;
+  if (!predictedRoute || typeof predictedRoute !== 'object') return [];
+
+  const lines = [];
+  const nextWaypoint = formatADSRouteWaypoint(predictedRoute.next_waypoint, true);
+  const nextNextWaypoint = formatADSRouteWaypoint(predictedRoute.next_next_waypoint, false);
+  if (nextWaypoint) lines.push(`Next waypoint: ${nextWaypoint}`);
+  if (nextNextWaypoint) lines.push(`Next+1 waypoint: ${nextNextWaypoint}`);
+  return lines;
+}
+
+function formatADSRouteWaypoint(waypoint, includeEta){
+  if (!waypoint || typeof waypoint !== 'object') return '';
+
+  const latitude = coerceNum(waypoint.latitude);
+  const longitude = coerceNum(waypoint.longitude);
+  const altitude = coerceNum(waypoint.altitude_ft);
+  const eta = coerceNum(waypoint.eta_seconds);
+  const parts = [];
+
+  if (isNum(latitude) && isNum(longitude)) {
+    parts.push(formatADSCPosition(latitude, longitude));
+  }
+  if (isNum(altitude)) {
+    parts.push(`FL ${Math.round(altitude / 100)}`);
+  }
+  if (includeEta && isNum(eta) && eta >= 0) {
+    parts.push(`ETA ${formatADSReportTime(eta)}`);
+  }
+  return parts.join(' • ');
+}
+
+function formatADSCPosition(latitude, longitude){
+  const lat = coerceNum(latitude);
+  const lon = coerceNum(longitude);
+  if (!isNum(lat) || !isNum(lon)) return '';
+
+  const ns = lat < 0 ? 'S' : 'N';
+  const ew = lon < 0 ? 'W' : 'E';
+  return `${Math.abs(lat).toFixed(4)}°${ns} ${Math.abs(lon).toFixed(4)}°${ew}`;
+}
+
+function formatADSReportTime(seconds){
+  const totalSeconds = Math.max(0, Math.round(Number(seconds) || 0));
+  const hours = Math.floor(totalSeconds / 3600) % 24;
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const secs = totalSeconds % 60;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
+function adsContractTitle(kind){
+  switch (String(kind || '').trim().toLowerCase()) {
+    case 'event':
+      return ' Event contract request:';
+    case 'emergency_periodic':
+      return ' Emergency periodic contract request:';
+    default:
+      return ' Periodic contract request:';
+  }
+}
+
+function parseADSCUplinkRequest(adsc){
+  const backendRequest = parseADSCUplinkRequestFromBackend(adsc);
+  if (backendRequest) return backendRequest;
+
+  const bytes = hexToBytes(String(adsc?.raw_hex || ''));
+  const payloadBytes = Number(adsc?.payload_bytes || 0);
+  const payload = payloadBytes > 0 ? bytes.slice(0, payloadBytes) : bytes;
+  if (!payload.length) return null;
+
+  const header = payload[0];
+  if (header === 0x01) {
+    return {
+      kind: 'terminate',
+      contractNum: null,
+      intervalSecs: 0,
+      items: ['Cancel all contracts and terminate connection']
+    };
+  }
+  if (header === 0x02) {
+    return {
+      kind: 'cancel',
+      contractNum: payload.length > 1 ? payload[1] : null,
+      intervalSecs: 0,
+      items: []
+    };
+  }
+  if (header === 0x06) {
+    return {
+      kind: 'cancel_emergency',
+      contractNum: payload.length > 1 ? payload[1] : null,
+      intervalSecs: 0,
+      items: []
+    };
+  }
+  if (header === 0x07) {
+    return parseADSPeriodicRequest(payload, adsc);
+  }
+  if (header === 0x08) {
+    return parseADSEventRequest(payload, adsc);
+  }
+  if (header === 0x09) {
+    const request = parseADSPeriodicRequest(payload, adsc);
+    if (request) request.kind = 'emergency_periodic';
+    return request;
+  }
+
+  return null;
+}
+
+function parseADSCUplinkRequestFromBackend(adsc){
+  const contract = adsc?.contract_request;
+  if (!contract || typeof contract !== 'object') return null;
+
+  const kind = String(contract.kind || '').trim().toLowerCase();
+  const messageType = String(adsc?.message_type || '').trim().toLowerCase();
+  const resolvedKind = kind || inferADSContractKindFromMessageType(messageType);
+  if (!resolvedKind) return null;
+
+  const request = {
+    kind: resolvedKind,
+    contractNum: Number.isFinite(Number(contract.contract_num)) ? Number(contract.contract_num) : null,
+    intervalSecs: Number.isFinite(Number(contract.interval_secs)) ? Number(contract.interval_secs) : 0,
+    items: []
+  };
+
+  const groups = Array.isArray(contract.groups) ? contract.groups : [];
+  let hasBackendGroups = false;
+  for (const group of groups) {
+    const line = formatADSContractRequestGroup(group, request);
+    if (!line) continue;
+    hasBackendGroups = true;
+    request.items.push(line);
+  }
+
+  if (hasBackendGroups || resolvedKind === 'terminate' || resolvedKind === 'cancel' || resolvedKind === 'cancel_emergency') {
+    return request;
+  }
+
+  return null;
+}
+
+function inferADSContractKindFromMessageType(messageType){
+  switch (messageType) {
+    case 'uplink_contract_request':
+      return 'periodic';
+    case 'uplink_cancel_contract':
+      return 'cancel';
+    case 'uplink_terminate_connection':
+      return 'terminate';
+    case 'uplink_cancel_emergency':
+      return 'cancel_emergency';
+    default:
+      return '';
+  }
+}
+
+function formatADSContractRequestGroup(group, request){
+  if (!group || typeof group !== 'object') return '';
+
+  const tag = Number(group.tag);
+  const modulus = Number(group.modulus);
+  const projectionMins = Number(group.projection_mins);
+  const thresholdNm = Number(group.threshold_nm);
+  const thresholdFpm = Number(group.threshold_fpm);
+  const floorAlt = Number(group.floor_alt);
+  const ceilingAlt = Number(group.ceiling_alt);
+  const intervalSecs = Number(group.interval_secs);
+  const higherThan = Boolean(group.higher_than);
+
+  if (tag === 0x0B && Number.isFinite(intervalSecs)) {
+    request.intervalSecs = intervalSecs;
+    return '';
+  }
+  if (tag === 0x14 && group.report_waypoint_changes) {
+    return 'Report waypoint changes';
+  }
+  if (tag === 0x15 && Number.isFinite(modulus)) {
+    let line = `Aircraft intent data: every ${modulus} reports`;
+    if (Number.isFinite(projectionMins) && projectionMins > 0) {
+      line += `, projection time: ${projectionMins} minutes`;
+    }
+    return line;
+  }
+  if (tag === 0x0A && Number.isFinite(thresholdNm)) {
+    return `Report when lateral deviation exceeds: ${thresholdNm.toFixed(3)} nm`;
+  }
+  if (tag === 0x12 && Number.isFinite(thresholdFpm)) {
+    return `Report when vertical speed is: ${higherThan ? '>' : '<'}${thresholdFpm} ft/min`;
+  }
+  if (tag === 0x13 && Number.isFinite(floorAlt) && Number.isFinite(ceilingAlt)) {
+    return `Report when altitude out of range: ${floorAlt}-${ceilingAlt} ft`;
+  }
+
+  const name = String(group.name || '').trim();
+  if (name && Number.isFinite(modulus)) {
+    return `${name}: every ${modulus} reports`;
+  }
+
+  return '';
+}
+
+function parseADSPeriodicRequest(payload, adsc){
+  if (payload.length < 2) return null;
+
+  const request = {
+    kind: 'periodic',
+    contractNum: payload[1],
+    intervalSecs: Number(adsc?.contract_request?.interval_secs || 0),
+    items: []
+  };
+
+  for (let index = 2; index < payload.length; ) {
+    const tag = payload[index++];
+
+    if (tag === 0x15) {
+      if (index + 1 >= payload.length) break;
+      const every = payload[index++];
+      const projectionMinutes = payload[index++];
+      let line = `Aircraft intent data: every ${every} reports`;
+      if (projectionMinutes > 0) {
+        line += `, projection time: ${projectionMinutes} minutes`;
+      }
+      request.items.push(line);
+      continue;
+    }
+
+    if (index >= payload.length) break;
+    const value = payload[index++];
+
+    if (tag === 0x0B) {
+      request.intervalSecs = decodeADSReportingInterval(value, request.intervalSecs);
+      continue;
+    }
+
+    const label = adsPeriodicTagLabel(tag);
+    if (label) {
+      request.items.push(`${label}: every ${value} reports`);
+    }
+  }
+
+  return request;
+}
+
+function parseADSEventRequest(payload, adsc){
+  if (payload.length < 2) return null;
+
+  const request = {
+    kind: 'event',
+    contractNum: payload[1],
+    intervalSecs: 0,
+    items: []
+  };
+
+  for (let index = 2; index < payload.length; index++) {
+    const tag = payload[index];
+    if (tag === 0x14) {
+      request.items.push('Report waypoint changes');
+    }
+  }
+
+  return request;
+}
+
+function adsPeriodicTagLabel(tag){
+  switch (tag) {
+    case 0x0D: return 'Predicted route';
+    case 0x0E: return 'Earth reference data';
+    case 0x0F: return 'Air reference data';
+    case 0x10: return 'Meteo data';
+    default: return '';
+  }
+}
+
+function decodeADSReportingInterval(value, fallbackSecs){
+  if (Number.isFinite(value) && value === 0) {
+    return 0;
+  }
+  if (Number.isFinite(value) && value > 0xBF) {
+    return (value - 0xBF) * 64;
+  }
+  if (Number.isFinite(value) && value > 0) {
+    return value * 64;
+  }
+  if (Number.isFinite(fallbackSecs) && fallbackSecs > 0) {
+    return fallbackSecs;
+  }
+  return 0;
+}
+
+function hexToBytes(value){
+  const clean = String(value || '').replace(/[^0-9A-F]/gi, '');
+  const bytes = [];
+  for (let index = 0; index + 1 < clean.length; index += 2) {
+    bytes.push(parseInt(clean.slice(index, index + 2), 16));
+  }
+  return bytes;
+}
+
+function renderKeyValuePairs(pairs){
+  const usable = Array.isArray(pairs)
+    ? pairs.filter((pair) => Array.isArray(pair) && String(pair[1] ?? '').trim() !== '')
+    : [];
+  if (!usable.length) return '';
+
+  let html = '<div class="kvbox"><div class="kvrows">';
+  for (const [key, value] of usable){
+    html += `<div class="kvrow"><div class="kvk">${escapeHtml(key)}</div><div class="kvv">${escapeHtml(value)}</div></div>`;
+  }
+  html += '</div></div>';
+  return html;
+}
+
+function inferResultType(result, messageLabel){
+  if (!result || typeof result !== 'object') return '';
+
+  const messageType = String(result.message_type || result.msg_type || '').trim();
+  if (messageType) return messageType;
+
+  const label = String(messageLabel || '').trim().toUpperCase();
+  const hfnpduType = String(result.hfnpdu_type || '').trim();
+  if (hfnpduType) return 'hfdl_data';
+
+  if (label === 'HFDL') {
+    const flightId = String(result.flight_id || result.flight || '').trim();
+    const lat = coerceNum(result.latitude ?? result.lat);
+    const lon = coerceNum(result.longitude ?? result.lon);
+    if (flightId || (isNum(lat) && isNum(lon))) {
+      return 'hfdl_data';
+    }
+  }
+
+  return '';
+}
+
+function extractGroundStationText(text){
+  const match = String(text || '').match(/\bGS\s+(\d+)\b/i);
+  return match ? match[1] : '';
+}
+
+function formatCompactNumber(value, decimals){
+  const digits = Number.isFinite(decimals) ? decimals : 3;
+  const fixed = Number(value).toFixed(digits);
+  return fixed.replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+}
+
+function formatHFDLFrequency(value){
+  const freq = coerceNum(value);
+  if (!isNum(freq) || freq <= 0) return '';
+
+  if (freq >= 1000000) {
+    return `${formatCompactNumber(freq / 1000, 3)} kHz`;
+  }
+  if (freq >= 1000) {
+    return `${formatCompactNumber(freq, 3)} kHz`;
+  }
+  return formatCompactNumber(freq, 3);
+}
+
+function extractHFDLContext(value){
+  if (!value || typeof value !== 'object') return null;
+
+  if (String(value.hfnpdu_type || '').trim()) {
+    return {
+      result: value,
+      message: (value.message && typeof value.message === 'object') ? value.message : null
+    };
+  }
+
+  if (value.raw && typeof value.raw === 'object') {
+    return extractHFDLContext(value.raw);
+  }
+
+  const message = (value.message && typeof value.message === 'object') ? value.message : null;
+  const messageLabel = String(message?.label || value.label || '').trim().toUpperCase();
+  const results = Array.isArray(value.results) ? value.results : [];
+
+  for (const result of results) {
+    if (!result || typeof result !== 'object') continue;
+    if (inferResultType(result, messageLabel) === 'hfdl_data') {
+      return { result, message };
+    }
+  }
+
+  if (messageLabel === 'HFDL') {
+    return { result: message || value, message };
+  }
+
+  return null;
+}
+
+function buildHFDLPairs(row){
+  const context = extractHFDLContext(row);
+  if (!context) return [];
+
+  const result = context.result || {};
+  const message = context.message || {};
+  const flightId = String(result.flight_id || '').trim();
+  const flight = String(extractFlightDisplay(row?.raw || row) || result.flight || '').trim();
+  const tail = String(result.tail || row?.tail || message.tail || '').trim();
+  const hfnpduType = String(result.hfnpdu_type || '').trim();
+  const icao = String(result.icao || message?.airframe?.icao || '').trim().toUpperCase();
+  const source = String(result.source || message.source || row?.raw?.source || '').trim();
+  const groundStation = extractGroundStationText(message.text || row?.summary || '');
+  const latitude = coerceNum(result.latitude ?? row?.lat ?? message.latitude ?? row?.raw?.latitude);
+  const longitude = coerceNum(result.longitude ?? row?.lon ?? message.longitude ?? row?.raw?.longitude);
+  const frequency = formatHFDLFrequency(message.frequency ?? row?.raw?.frequency ?? row?.frequency);
+  const syntheticText = String(message.text || '').trim();
+
+  const pairs = [];
+  if (hfnpduType) pairs.push(['HFDL type', hfnpduType]);
+  if (flightId) pairs.push(['Flight ID', flightId]);
+  if (flight && flight !== flightId) pairs.push(['Flight', flight]);
+  if (tail) pairs.push(['Tail/Reg', tail]);
+  if (icao) pairs.push(['ICAO', icao]);
+  if (groundStation) pairs.push(['Ground station', `GS ${groundStation}`]);
+  if (frequency) pairs.push(['Frequency', frequency]);
+  if (source) pairs.push(['Source', source]);
+  if (isNum(latitude) && isNum(longitude)) pairs.push(['Coordinates', coordStr(latitude, longitude)]);
+  if (syntheticText) pairs.push(['Synthetic text', syntheticText]);
+  return pairs;
+}
+
+function buildHFDLSummary(value){
+  const context = extractHFDLContext(value);
+  if (!context) return '';
+
+  const result = context.result || {};
+  const message = context.message || {};
+  const parts = [];
+  const hfnpduType = String(result.hfnpdu_type || '').trim();
+  const flightId = String(result.flight_id || '').trim();
+  const icao = String(result.icao || message?.airframe?.icao || '').trim().toUpperCase();
+  const groundStation = extractGroundStationText(message.text || '');
+
+  if (hfnpduType) parts.push(hfnpduType);
+  if (flightId) parts.push(`FID ${flightId}`);
+  if (icao) parts.push(`ICAO ${icao}`);
+  if (groundStation) parts.push(`GS ${groundStation}`);
+  return parts.join(' • ');
+}
+
+function renderPreferredDetailsObject(row){
+  const hfdlPairs = buildHFDLPairs(row);
+  if (hfdlPairs.length) {
+    return renderKeyValuePairs(hfdlPairs);
+  }
+  return renderDetailsObject(row?.raw ?? row);
+}
+
+function isHFDLRow(row){
+  if (!row || typeof row !== 'object') return false;
+  if (String(row.type || row.message_type || '').trim() === 'hfdl_data') return true;
+  return !!extractHFDLContext(row);
+}
+
+function getDirectMarkerStyle(row){
+  if (isHFDLRow(row)) {
+    return {
+      radius: 6,
+      weight: 2,
+      color: '#0f766e',
+      fillColor: '#14b8a6',
+      fillOpacity: 0.9
+    };
+  }
+
+  return {
+    radius: 4,
+    weight: 1,
+    fillOpacity: 0.8
+  };
+}
+
+function formatWaypointPopupDetails(point){
+  const pointName = String(point?.name || point?.waypoint || point?.position_name || '').trim();
+  const segment = String(point?.segment || '').trim();
+  const flightLevel = coerceNum(point?.flight_level ?? point?.flightLevel ?? point?.FL ?? point?.fl);
+  const windDir = coerceNum(point?.wind_dir ?? point?.windDir);
+  const windSpeed = coerceNum(point?.wind_speed ?? point?.windSpeed);
+  const temperature = coerceNum(point?.temperature ?? point?.temp);
+  const windSpeedKmh = Number.isFinite(windSpeed) ? windSpeed * 1.852 : null;
+  const layers = Array.isArray(point?.layers) ? [...point.layers] : [];
+
+  let segmentText = '';
+  if (segment === 'route_wind') segmentText = 'PWI route wind';
+  else if (segment === 'approach') segmentText = 'Approach waypoint';
+  else if (pointName) segmentText = 'Route waypoint';
+
+  const pairs = [];
+  if (segmentText) pairs.push(['Type', segmentText]);
+  if (pointName) pairs.push(['Fix', pointName]);
+  if (layers.length) {
+    layers.sort((left, right) => {
+      const a = coerceNum(left?.flight_level) ?? -1;
+      const b = coerceNum(right?.flight_level) ?? -1;
+      return a - b;
+    });
+    for (const layer of layers){
+      const layerFlightLevel = coerceNum(layer?.flight_level);
+      const layerWindDir = coerceNum(layer?.wind_dir);
+      const layerWindSpeed = coerceNum(layer?.wind_speed);
+      const layerWindSpeedKmh = Number.isFinite(layerWindSpeed) ? layerWindSpeed * 1.852 : null;
+      const layerTemperature = coerceNum(layer?.temperature);
+      const valueParts = [];
+      if (Number.isFinite(layerWindDir) && Number.isFinite(layerWindSpeedKmh)) {
+        valueParts.push(`${Math.round(layerWindDir)}° / ${Math.round(layerWindSpeedKmh)} km/h`);
+      }
+      if (Number.isFinite(layerTemperature)) {
+        valueParts.push(`${Math.round(layerTemperature)} C`);
+      }
+      const layerKey = Number.isFinite(layerFlightLevel) && layerFlightLevel > 0
+        ? `FL ${Math.round(layerFlightLevel)}`
+        : 'Layer';
+      if (valueParts.length) {
+        pairs.push([layerKey, valueParts.join(' • ')]);
+      }
+    }
+  } else {
+    if (Number.isFinite(flightLevel) && flightLevel > 0) pairs.push(['Flight level', `FL ${Math.round(flightLevel)}`]);
+    if (Number.isFinite(windDir) && Number.isFinite(windSpeedKmh)) pairs.push(['Wind', `${Math.round(windDir)}° / ${Math.round(windSpeedKmh)} km/h`]);
+    if (Number.isFinite(temperature)) pairs.push(['Temperature', `${Math.round(temperature)} C`]);
+  }
+  if (point?.lookup_resolved) pairs.push(['Coordinates source', 'Waypoints.txt lookup']);
+  return renderKeyValuePairs(pairs);
+}
+
 function coordStr(lat, lon){
   if (!(isNum(lat) && isNum(lon))) return '';
   return `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
 }
 
 
-function openMapAllFiltered(){
-  // Collect filtered rows that have either direct coords OR waypoint points
-  const pts = [];
-  for (const idx of filteredIdx){
-    const r = rows[idx];
-    const hasDirect = isNum(r.lat) && isNum(r.lon);
-    const hasWpts =
-      (r && r.raw && Array.isArray(r.raw.points) && r.raw.points.length) ||
-      (r && r.raw && Array.isArray(r.raw.results) && r.raw.results.some(x => x && Array.isArray(x.points) && x.points.length));
-    if (hasDirect || hasWpts){
-      pts.push(r);
-    }
-  }
-  if (!pts.length){
-    alert("No points with coords or multi-waypoint (in current filter).");
+function openMapRows(pts, titleText, openFirstPopup){
+  if (!Array.isArray(pts) || !pts.length){
+    alert('No points with coords or multi-waypoint (in current filter).');
     return;
   }
 
-  // If Leaflet missing (offline), open OSM with first point
-  const first = pts[0];
-  const osm = `https://www.openstreetmap.org/?mlat=${encodeURIComponent(first.lat)}&mlon=${encodeURIComponent(first.lon)}#map=6/${encodeURIComponent(first.lat)}/${encodeURIComponent(first.lon)}`;
+  const firstPoint = pts.map(getPrimaryMapPoint).find(Boolean);
+  const osm = firstPoint
+    ? `https://www.openstreetmap.org/?mlat=${encodeURIComponent(firstPoint.lat)}&mlon=${encodeURIComponent(firstPoint.lon)}#map=6/${encodeURIComponent(firstPoint.lat)}/${encodeURIComponent(firstPoint.lon)}`
+    : 'https://www.openstreetmap.org/';
   const osmLink = document.getElementById('osmLink');
   osmLink.href = osm;
 
   if (!window.L){
-    window.open(osm, "_blank", "noopener");
+    window.open(osm, '_blank', 'noopener');
     return;
   }
 
-  document.getElementById('mapTitle').textContent =
-    `Sve koordinate • tačaka: ${pts.length}`;
+  document.getElementById('mapTitle').textContent = titleText;
 
   const modal = document.getElementById('mapModal');
   modal.style.display = 'block';
@@ -787,24 +2012,20 @@ function openMapAllFiltered(){
     }).addTo(map);
   }
 
-  // Non-interactive pane for track lines (so lines never steal clicks)
   if (!map.getPane('trackPane')){
     map.createPane('trackPane');
-    map.getPane('trackPane').style.zIndex = 250;       // below markers
-    map.getPane('trackPane').style.pointerEvents = 'none'; // critical: no clicks
+    map.getPane('trackPane').style.zIndex = 250;
+    map.getPane('trackPane').style.pointerEvents = 'none';
   }
 
-  // Clear single marker and previous layer
   if (marker) { try { marker.remove(); } catch(e) {} marker = null; }
   if (allLayer) { try { allLayer.remove(); } catch(e) {} allLayer = null; }
-
   allLayer = L.layerGroup().addTo(map);
 
-  // Label markers (Tail/Reg) — show once per aircraft to avoid clutter
   const labeledTails = new Set();
-  
-    function getFlightLevelTextFromAny(obj){
-    // Prefer explicit flight_level if present (already FL), otherwise use altitude in feet (altitude_ft).
+  let firstPopupMarker = null;
+
+  function getFlightLevelTextFromAny(obj){
     const flRaw = (obj?.flight_level ?? obj?.flightLevel ?? obj?.FL ?? obj?.fl ?? null);
     const flNum = coerceNum(flRaw);
     if (isNum(flNum) && flNum > 0 && flNum <= 999){
@@ -815,33 +2036,27 @@ function openMapAllFiltered(){
       obj?.altitude_ft ?? obj?.altitudeFt ?? obj?.alt_ft ?? obj?.altFt ??
       obj?.altitude ?? obj?.Altitude ?? obj?.alt ?? null
     );
-    if (!isNum(altFt)) return "";
-
-    // If it's clearly feet (e.g. 32999, 40000) -> FL = ft/100
+    if (!isNum(altFt)) return '';
     if (altFt > 500){
       const fl = Math.round(altFt / 100);
       if (isFinite(fl) && fl > 0) return `FL ${fl}`;
     }
 
-    // Otherwise treat as FL already
     const fl = Math.round(altFt);
-    if (!isFinite(fl) || fl <= 0) return "";
+    if (!isFinite(fl) || fl <= 0) return '';
     return `FL ${fl}`;
   }
 
-    function getFlightLevelTextForRow(r){
-    if (!r) return "";
-    // 1) try direct row fields
+  function getFlightLevelTextForRow(r){
+    if (!r) return '';
     let t = getFlightLevelTextFromAny(r);
     if (t) return t;
 
-    // 2) try raw object
     const raw = r.raw || null;
     if (raw){
       t = getFlightLevelTextFromAny(raw);
       if (t) return t;
 
-      // 3) many decoders store numeric fields in raw.results[] entries
       const res = raw.results;
       if (Array.isArray(res)){
         for (const it of res){
@@ -850,17 +2065,15 @@ function openMapAllFiltered(){
         }
       }
 
-      // 4) sometimes under raw.message
       if (raw.message){
         t = getFlightLevelTextFromAny(raw.message);
         if (t) return t;
       }
     }
-    return "";
+    return '';
   }
 
   function getFlightLevelTextForPoint(p, r){
-    // prefer waypoint point altitude, fallback to row altitude
     const t1 = getFlightLevelTextFromAny(p || {});
     if (t1) return t1;
     return getFlightLevelTextForRow(r);
@@ -871,7 +2084,7 @@ function openMapAllFiltered(){
     const key = String(tailLabel).trim();
     if (!key || labeledTails.has(key)) return;
 
-    const line2 = (flText && String(flText).trim()) ? `<div class="ptl2">${escapeHtml(flText)}</div>` : "";
+    const line2 = (flText && String(flText).trim()) ? `<div class="ptl2">${escapeHtml(flText)}</div>` : '';
     const ico = L.divIcon({
       className: 'ptlabel',
       html: `<div class="ptlabelbox"><div class="ptl1">${escapeHtml(key)}</div>${line2}</div>`,
@@ -882,20 +2095,17 @@ function openMapAllFiltered(){
     labeledTails.add(key);
   }
 
-  // Per-point FL label (always)
   function addFLLabel(latlng, flText){
     if (!flText) return;
     const ico = L.divIcon({
       className: 'ptfl',
       html: `<div class="ptflbox">${escapeHtml(flText)}</div>`,
       iconSize: [1,1],
-      iconAnchor: [-6, -8] // slightly above-right of point
+      iconAnchor: [-6, -8]
     });
     L.marker(latlng, {icon: ico, interactive: false}).addTo(allLayer);
   }
 
-
-  // ---- Build non-clickable track polylines for H2 points per tail/reg ----
   function tsToMs(ts){
     if (ts === null || ts === undefined || ts === '') return 0;
     if (typeof ts === 'number' && isFinite(ts)){
@@ -913,54 +2123,32 @@ function openMapAllFiltered(){
     return 0;
   }
 
-  function getWaypointsFromRow(r){
-    // Returns array of waypoint objects where lat/lon are inside.
-    if (!r || !r.raw) return [];
-    if (Array.isArray(r.raw.points) && r.raw.points.length) return r.raw.points;
-  
-    if (Array.isArray(r.raw.results)){
-      for (const it of r.raw.results){
-        if (it && Array.isArray(it.points) && it.points.length) return it.points;
-      }
-    }
-    return [];
-  }
-
-  const trackByTail = new Map(); // tail -> [{lat,lon,t,seq}]
+  const trackByTail = new Map();
   for (const r of pts){
     const tail = (r.tail || '').trim();
     if (!tail) continue;
 
     const tms = tsToMs(r.timestamp);
-
-    // 1) direct coords (Label 80 POSRPT etc.)
     if (isNum(r.lat) && isNum(r.lon)){
       if (!trackByTail.has(tail)) trackByTail.set(tail, []);
       trackByTail.get(tail).push({lat: r.lat, lon: r.lon, t: tms, seq: -1});
     }
 
-    // 2) multi-waypoint coords (H2 / ADS-C etc.)
     const pArr = getWaypointsFromRow(r);
-    if (pArr && pArr.length){
-      for (let k=0; k<pArr.length; k++){
-        const p = pArr[k];
-        const lat = coerceNum(p && (p.latitude ?? p.lat));
-        const lon = coerceNum(p && (p.longitude ?? p.lon));
-        if (!(isNum(lat) && isNum(lon))) continue;
-
-        if (!trackByTail.has(tail)) trackByTail.set(tail, []);
-        trackByTail.get(tail).push({lat, lon, t: tms, seq: k});
-      }
+    for (let k=0; k<pArr.length; k++){
+      const p = pArr[k];
+      const lat = coerceNum(p && (p.latitude ?? p.lat));
+      const lon = coerceNum(p && (p.longitude ?? p.lon));
+      if (!(isNum(lat) && isNum(lon))) continue;
+      if (!trackByTail.has(tail)) trackByTail.set(tail, []);
+      trackByTail.get(tail).push({lat, lon, t: tms, seq: k});
     }
   }
 
-  // Draw one polyline per tail (sorted by message time, then point order in message)
-  for (const [tail, arr] of trackByTail.entries()){
+  for (const [, arr] of trackByTail.entries()){
     if (arr.length < 2) continue;
-
     arr.sort((a,b) => (a.t - b.t) || (a.seq - b.seq));
 
-    // Optional: dedupe consecutive identical points
     const latlngs = [];
     let prev = null;
     for (const p of arr){
@@ -980,142 +2168,342 @@ function openMapAllFiltered(){
     }).addTo(allLayer);
   }
 
-  // Add markers: (1) direct row coords if present, (2) all waypoints if present
+  const allLatLngs = [];
   for (const r of pts){
     const tailLabel = (r.tail || r.registration || '').trim();
-  
-    // (1) direct coords marker (optional)
+
     if (isNum(r.lat) && isNum(r.lon)){
       const latlng = [r.lat, r.lon];
-      const cm = L.circleMarker(latlng, { radius: 4, weight: 1, fillOpacity: 0.8 });
+      allLatLngs.push(latlng);
+      const cm = L.circleMarker(latlng, getDirectMarkerStyle(r));
+      const hfdlPairs = buildHFDLPairs(r);
+      const hfdlContext = extractHFDLContext(r);
+      const popupTitle = hfdlPairs.length
+        ? `${String(extractFlightDisplay(r.raw || r) || r.tail || '').trim() || 'HFDL'} • ${String(hfdlContext?.result?.hfnpdu_type || r.type || '').trim() || 'data'} • ${String(r.label || 'HFDL').trim() || 'HFDL'}`
+        : `${r.tail || ''} • ${r.type || ''} • ${r.label || ''}`;
       const popupHtml =
         `<div style="max-width:560px">
-          <div class="nowrap"><b>${escapeHtml(r.tail || '')}</b> • ${escapeHtml(r.type || '')} • ${escapeHtml(r.label || '')}</div>
+          <div class="nowrap"><b>${escapeHtml(popupTitle)}</b></div>
           <div class="kvmini" style="margin:4px 0 8px 0">${escapeHtml(formatTimestamp(r.timestamp))} • ${escapeHtml(coordStr(r.lat, r.lon))}</div>
-          ${renderDetailsObject(r.raw)}
+          ${hfdlPairs.length ? renderKeyValuePairs(hfdlPairs) : renderDetailsObject(r.raw)}
          </div>`;
       cm.bindPopup(popupHtml, {maxWidth: 9999, maxHeight: 9999, className: 'big-popup'});
       cm.addTo(allLayer);
+      if (!firstPopupMarker) firstPopupMarker = cm;
 
-      // Tail/Reg label (once per aircraft)
       addTailLabel(latlng, tailLabel, getFlightLevelTextForRow(r));
       addFLLabel(latlng, getFlightLevelTextForRow(r));
-}
-  
-    // (2) waypoint markers (multi-waypoint)
+    }
+
     const wpts = getWaypointsFromRow(r);
-    if (wpts && wpts.length){
-      for (let k=0; k<wpts.length; k++){
-        const p = wpts[k];
-        const lat = coerceNum(p && (p.latitude ?? p.lat));
-        const lon = coerceNum(p && (p.longitude ?? p.lon));
-        if (!(isNum(lat) && isNum(lon))) continue;
-  
-        const latlng = [lat, lon];
-  
-        // smaller dot for waypoints
-        const cm = L.circleMarker(latlng, { radius: 3, weight: 1, fillOpacity: 0.85 });
-  
-        // Tail/Reg label (once per aircraft)
-        addTailLabel(latlng, tailLabel, getFlightLevelTextForRow(r));
-        addFLLabel(latlng, getFlightLevelTextForPoint(p, r));
-// waypoint popup shows point fields too
-        const popupHtml =
-          `<div style="max-width:560px">
-            <div class="nowrap"><b>${escapeHtml(r.tail || '')}</b> • waypoint #${k+1} • ${escapeHtml(r.label || '')}</div>
-            <div class="kvmini" style="margin:4px 0 8px 0">${escapeHtml(formatTimestamp(r.timestamp))} • ${escapeHtml(coordStr(lat, lon))}</div>
-            ${renderDetailsObject(p)}
-           </div>`;
-        cm.bindPopup(popupHtml, {maxWidth: 9999, maxHeight: 9999, className: 'big-popup'});
-        cm.addTo(allLayer);
+    for (let k=0; k<wpts.length; k++){
+      const p = wpts[k];
+      const lat = coerceNum(p && (p.latitude ?? p.lat));
+      const lon = coerceNum(p && (p.longitude ?? p.lon));
+      if (!(isNum(lat) && isNum(lon))) continue;
+
+      const latlng = [lat, lon];
+      allLatLngs.push(latlng);
+      const cm = L.circleMarker(latlng, { radius: 3, weight: 1, fillOpacity: 0.85 });
+
+      addTailLabel(latlng, tailLabel, getFlightLevelTextForRow(r));
+      addFLLabel(latlng, getFlightLevelTextForPoint(p, r));
+
+      const pointName = String(p?.name || p?.waypoint || `waypoint #${k+1}`).trim();
+      const popupHtml =
+        `<div style="max-width:560px">
+          <div class="nowrap"><b>${escapeHtml(r.tail || '')}</b> • ${escapeHtml(pointName)} • ${escapeHtml(r.label || '')}</div>
+          <div class="kvmini" style="margin:4px 0 8px 0">${escapeHtml(formatTimestamp(r.timestamp))} • ${escapeHtml(coordStr(lat, lon))}</div>
+          ${formatWaypointPopupDetails(p)}
+         </div>`;
+      cm.bindPopup(popupHtml, {maxWidth: 9999, maxHeight: 9999, className: 'big-popup'});
+      cm.addTo(allLayer);
+      if (!firstPopupMarker) firstPopupMarker = cm;
+    }
+  }
+
+  if (allLatLngs.length > 1){
+    map.fitBounds(L.latLngBounds(allLatLngs).pad(0.15));
+  } else if (firstPoint) {
+    map.setView([firstPoint.lat, firstPoint.lon], 7);
+  }
+
+  marker = firstPopupMarker;
+
+  setTimeout(() => {
+    try { map.invalidateSize(); } catch(e) {}
+    if (openFirstPopup && firstPopupMarker){
+      try { firstPopupMarker.openPopup(); } catch(e) {}
+    }
+  }, 60);
+}
+
+
+function openMapAllFiltered(){
+  // Collect filtered rows that have either direct coords OR waypoint points
+  const pts = [];
+  for (const idx of filteredIdx){
+    const r = rows[idx];
+    const hasDirect = isNum(r.lat) && isNum(r.lon);
+    const hasWpts = getWaypointsFromRow(r).length > 0;
+    if (hasDirect || hasWpts){
+      pts.push(r);
+    }
+  }
+  if (!pts.length){
+    alert("No points with coords or multi-waypoint (in current filter).");
+    return;
+  }
+  openMapRows(pts, `Sve koordinate • tačaka: ${pts.length}`, false);
+}
+
+function openMapForRow(r){
+  if (!getPrimaryMapPoint(r)){
+    alert("No coordinates on this row.");
+    return;
+  }
+  openMapRows([r], `${r.tail || 'Aircraft'} • ${formatTimestamp(r.timestamp)}`, true);
+}
+
+function waypointCoords(point){
+  const lat = coerceNum(point && (point.latitude ?? point.lat));
+  const lon = coerceNum(point && (point.longitude ?? point.lon));
+  if (!(isNum(lat) && isNum(lon))) return null;
+  return { lat, lon };
+}
+
+function waypointDistanceKm(a, b){
+  if (!a || !b) return Infinity;
+  const toRad = (value) => value * Math.PI / 180;
+  const earthRadiusKm = 6371;
+  const dLat = toRad(b.lat - a.lat);
+  const dLon = toRad(b.lon - a.lon);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const hav = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+  return 2 * earthRadiusKm * Math.atan2(Math.sqrt(hav), Math.sqrt(1 - hav));
+}
+
+function cloneWaypointPoint(point, defaults){
+  if (point === null || point === undefined) return;
+
+  const pointObj = (typeof point === 'string') ? { name: point } : point;
+  if (!pointObj || typeof pointObj !== 'object') return null;
+  const merged = Object.assign({}, defaults || {}, pointObj);
+  const pointName = String(merged.name || merged.waypoint || merged.position_name || '').trim();
+  if (pointName && !merged.name && !merged.waypoint) {
+    merged.name = pointName;
+  }
+  return merged;
+}
+
+function appendWaypointPoint(points, point, defaults){
+  const cloned = cloneWaypointPoint(point, defaults);
+  if (cloned) points.push(cloned);
+}
+
+function findWaypointAnchor(points, startIndex, step){
+  for (let index = startIndex; index >= 0 && index < points.length; index += step){
+    const point = points[index];
+    const direct = waypointCoords(point);
+    if (direct) return direct;
+
+    const pointName = String(point?.name || point?.waypoint || point?.position_name || '').trim();
+    const candidates = getWaypointCandidatesByName(pointName);
+    if (candidates.length === 1){
+      return { lat: candidates[0].lat, lon: candidates[0].lon };
+    }
+  }
+  return null;
+}
+
+function chooseWaypointCandidate(name, prevAnchor, nextAnchor){
+  const candidates = getWaypointCandidatesByName(name);
+  if (!candidates.length) return null;
+  if (candidates.length === 1) return candidates[0];
+
+  let best = candidates[0];
+  let bestScore = Infinity;
+  for (const candidate of candidates){
+    const coord = { lat: candidate.lat, lon: candidate.lon };
+    let score = 0;
+    if (prevAnchor) score += waypointDistanceKm(coord, prevAnchor);
+    if (nextAnchor) score += waypointDistanceKm(coord, nextAnchor);
+    if (!prevAnchor && !nextAnchor) score = Math.abs(coord.lat) + Math.abs(coord.lon) / 10;
+    if (score < bestScore){
+      best = candidate;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+function resolveWaypointSequence(points){
+  const resolved = [];
+  let previousResolved = null;
+
+  for (let index = 0; index < points.length; index++){
+    const current = Object.assign({}, points[index]);
+    const direct = waypointCoords(current);
+    if (direct){
+      current.latitude = direct.lat;
+      current.longitude = direct.lon;
+      previousResolved = direct;
+      resolved.push(current);
+      continue;
+    }
+
+    const pointName = String(current?.name || current?.waypoint || current?.position_name || '').trim();
+    if (!pointName){
+      continue;
+    }
+
+    const nextAnchor = findWaypointAnchor(points, index + 1, 1);
+    const candidate = chooseWaypointCandidate(pointName, previousResolved, nextAnchor);
+    if (!candidate) continue;
+
+    current.latitude = candidate.lat;
+    current.longitude = candidate.lon;
+    current.lookup_resolved = true;
+    current.lookup_choice_count = getWaypointCandidatesByName(pointName).length;
+    previousResolved = { lat: candidate.lat, lon: candidate.lon };
+    resolved.push(current);
+  }
+
+  return resolved;
+}
+
+function aggregateWaypointPoints(points){
+  const grouped = new Map();
+
+  for (let index = 0; index < points.length; index++){
+    const point = points[index];
+    const coords = waypointCoords(point);
+    if (!coords) continue;
+
+    const pointName = String(point?.name || point?.waypoint || point?.position_name || '').trim();
+    const key = [
+      normaliseWaypointName(pointName),
+      coords.lat.toFixed(6),
+      coords.lon.toFixed(6),
+      String(point?.segment || '').trim()
+    ].join('|');
+
+    if (!grouped.has(key)){
+      const base = Object.assign({}, point, {
+        latitude: coords.lat,
+        longitude: coords.lon,
+        name: point?.name || point?.waypoint || pointName,
+        layers: [],
+        _order: index
+      });
+      grouped.set(key, base);
+    }
+
+    const target = grouped.get(key);
+    target.lookup_resolved = !!(target.lookup_resolved || point.lookup_resolved);
+
+    const layerFlightLevel = coerceNum(point?.flight_level ?? point?.flightLevel);
+    const layerWindDir = coerceNum(point?.wind_dir ?? point?.windDir);
+    const layerWindSpeed = coerceNum(point?.wind_speed ?? point?.windSpeed);
+    const layerTemperature = coerceNum(point?.temperature ?? point?.temp);
+    const hasLayerData = Number.isFinite(layerFlightLevel) || Number.isFinite(layerWindDir) || Number.isFinite(layerWindSpeed) || Number.isFinite(layerTemperature);
+    if (hasLayerData){
+      const layerKey = [
+        Number.isFinite(layerFlightLevel) ? Math.round(layerFlightLevel) : '',
+        Number.isFinite(layerWindDir) ? Math.round(layerWindDir) : '',
+        Number.isFinite(layerWindSpeed) ? Math.round(layerWindSpeed) : '',
+        Number.isFinite(layerTemperature) ? Math.round(layerTemperature) : ''
+      ].join('|');
+
+      if (!target._layerSeen) target._layerSeen = new Set();
+      if (!target._layerSeen.has(layerKey)){
+        target._layerSeen.add(layerKey);
+        target.layers.push({
+          flight_level: layerFlightLevel,
+          wind_dir: layerWindDir,
+          wind_speed: layerWindSpeed,
+          temperature: layerTemperature
+        });
       }
     }
   }
 
-  // Fit bounds
-  const allLatLngs = [];
-  for (const r of pts){
-    if (isNum(r.lat) && isNum(r.lon)) allLatLngs.push([r.lat, r.lon]);
-    const wpts = getWaypointsFromRow(r);
-    for (const p of wpts){
-      const lat = coerceNum(p && (p.latitude ?? p.lat));
-      const lon = coerceNum(p && (p.longitude ?? p.lon));
-      if (isNum(lat) && isNum(lon)) allLatLngs.push([lat, lon]);
-    }
-  }
-  const bounds = L.latLngBounds(allLatLngs);
-  map.fitBounds(bounds.pad(0.15));
-
-  setTimeout(() => { try { map.invalidateSize(); } catch(e) {} }, 60);
+  return [...grouped.values()]
+    .sort((left, right) => (left._order ?? 0) - (right._order ?? 0))
+    .map((point) => {
+      const copy = Object.assign({}, point);
+      delete copy._order;
+      delete copy._layerSeen;
+      return copy;
+    });
 }
 
-function openMapForRow(r){
-  if (!(isNum(r.lat) && isNum(r.lon))){
-    alert("No coordinates on this row.");
-    return;
+function collectWaypointPoints(source, points, defaults){
+  if (!source || typeof source !== 'object') return;
+
+  if (Array.isArray(source.points)){
+    for (const point of source.points){
+      appendWaypointPoint(points, point, defaults);
+    }
   }
 
-  // Always set OSM fallback link
-  const osm = `https://www.openstreetmap.org/?mlat=${encodeURIComponent(r.lat)}&mlon=${encodeURIComponent(r.lon)}#map=8/${encodeURIComponent(r.lat)}/${encodeURIComponent(r.lon)}`;
-  const osmLink = document.getElementById('osmLink');
-  osmLink.href = osm;
-
-  // If Leaflet missing (offline), fallback to opening OSM
-  if (!window.L){
-    window.open(osm, "_blank", "noopener");
-    return;
+  if (Array.isArray(source.waypoints)){
+    for (const point of source.waypoints){
+      appendWaypointPoint(points, point, defaults);
+    }
   }
 
-  document.getElementById('mapTitle').textContent =
-    `${r.tail || 'Aircraft'} • ${formatTimestamp(r.timestamp)}`;
-
-  const modal = document.getElementById('mapModal');
-  modal.style.display = 'block';
-
-  if (!map){
-    map = L.map('map', { zoomControl: true });
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 18,
-      attribution: '&copy; OpenStreetMap contributors'
-    }).addTo(map);
+  if (Array.isArray(source.approach_waypoints)){
+    for (const point of source.approach_waypoints){
+      appendWaypointPoint(points, point, Object.assign({ segment: 'approach' }, defaults || {}));
+    }
   }
 
-  const latlng = [r.lat, r.lon];
-  map.setView(latlng, 7);
-
-  if (marker) marker.remove();
-  marker = L.circleMarker(latlng, { radius: 5, weight: 1, fillOpacity: 0.85 }).addTo(map);
-  const labelText = (r.tail || r.registration || '').trim();
-  const flText = getFlightLevelTextForRow(r);
-
-  // Main Tail/Reg label (2 rows: Tail + FL)
-  if (labelText){
-    const line2 = flText ? `<div class="ptl2">${escapeHtml(flText)}</div>` : '';
-    const ico = L.divIcon({
-      className: 'ptlabel',
-      html: `<div class="ptlabelbox"><div class="ptl1">${escapeHtml(labelText)}</div>${line2}</div>`,
-      iconSize: [1,1],
-      iconAnchor: [-6, 8]
-    });
-    L.marker(latlng, {icon: ico, interactive: false}).addTo(map);
+  if (Array.isArray(source.route_winds)){
+    for (const layer of source.route_winds){
+      const flightLevel = coerceNum(layer?.flight_level);
+      if (!Array.isArray(layer?.waypoints)) continue;
+      for (const point of layer.waypoints){
+        appendWaypointPoint(points, point, Object.assign({ flight_level: flightLevel, segment: 'route_wind' }, defaults || {}));
+      }
+    }
   }
-  // FL label near the point (always if available)
-  if (window.L && typeof addFLLabelToLayer === 'function'){
-    addFLLabelToLayer(map, latlng, flText);
+}
+
+function getWaypointsFromRow(r){
+  if (!r || !r.raw) return [];
+  if (waypointRowCache.has(r)){
+    return waypointRowCache.get(r);
   }
 
-  // Popup HTML: parsed details WITHOUT braces/quotes (rendered table)
-  const popupHtml =
-    `<div style="max-width:520px">
-      <div class="nowrap"><b>${escapeHtml(r.tail || '')}</b> • ${escapeHtml(r.type || '')} • ${escapeHtml(r.label || '')}</div>
-      <div class="kvmini" style="margin:4px 0 8px 0">${escapeHtml(formatTimestamp(r.timestamp))} • ${escapeHtml(coordStr(r.lat, r.lon))}</div>
-      ${renderDetailsObject(r.raw)}
-     </div>`;
+  const points = [];
+  collectWaypointPoints(r.raw, points);
+  if (Array.isArray(r.raw.results)){
+    for (const result of r.raw.results){
+      collectWaypointPoints(result, points);
+    }
+  }
 
-  marker.bindPopup(popupHtml, {maxWidth: 9999, maxHeight: 9999, className: 'big-popup'}).openPopup();
+  const resolved = resolveWaypointSequence(points);
+  const aggregated = aggregateWaypointPoints(resolved);
+  waypointRowCache.set(r, aggregated);
+  return aggregated;
+}
 
-  // Leaflet needs invalidateSize when modal opens
-  setTimeout(() => { try { map.invalidateSize(); } catch(e) {} }, 60);
+function getPrimaryMapPoint(r){
+  if (r && isNum(r.lat) && isNum(r.lon)){
+    return { lat: r.lat, lon: r.lon };
+  }
+  const waypoints = getWaypointsFromRow(r);
+  for (const point of waypoints){
+    const lat = coerceNum(point && (point.latitude ?? point.lat));
+    const lon = coerceNum(point && (point.longitude ?? point.lon));
+    if (isNum(lat) && isNum(lon)){
+      return { lat, lon };
+    }
+  }
+  return null;
 }
 
 function renderPage(){
@@ -1129,17 +2517,23 @@ function renderPage(){
   for (let j=start; j<end; j++){
     const i = filteredIdx[j];
     const r = rows[i];
+    const flightDisplay = getFlightDisplayForRow(r);
+    const manufacturerModel = String(r.manufacturerModel || '').trim();
 
     const tr = document.createElement('tr');
 
-    const tdTs = document.createElement('td'); tdTs.textContent = formatTimestamp(r.timestamp);
+    const tdTs = document.createElement('td');
+    tdTs.className = 'tscell';
+    tdTs.innerHTML = `<div class="tsmain">${escapeHtml(formatTimestamp(r.timestamp))}</div>`;
     const tdTail = document.createElement('td'); tdTail.textContent = r.tail || '';
+    const tdFlight = document.createElement('td'); tdFlight.textContent = flightDisplay;
     const tdLbl = document.createElement('td'); tdLbl.innerHTML = `<span class="pill">${escapeHtml(r.label||'')}</span>`;
     const tdT = document.createElement('td'); tdT.innerHTML = `<span class="type">${escapeHtml(r.type||'')}</span>`;
     const tdC = document.createElement('td'); tdC.textContent = coordStr(r.lat, r.lon);
 
     const tdM = document.createElement('td');
-    if (isNum(r.lat) && isNum(r.lon)){
+    const rowWaypoints = getWaypointsFromRow(r);
+    if ((isNum(r.lat) && isNum(r.lon)) || rowWaypoints.length){
       const btn = document.createElement('button');
       btn.className = 'btn-mini';
       btn.textContent = 'Prikaži na mapi';
@@ -1152,17 +2546,40 @@ function renderPage(){
     const tdD = document.createElement('td');
     tdD.appendChild(makeDetailsCell(i));
 
+    if (manufacturerModel) {
+      tdFlight.rowSpan = 2;
+      tdLbl.rowSpan = 2;
+      tdT.rowSpan = 2;
+      tdC.rowSpan = 2;
+      tdM.rowSpan = 2;
+      tdD.rowSpan = 2;
+    }
+
     tr.appendChild(tdTs);
     tr.appendChild(tdTail);
+    tr.appendChild(tdFlight);
     tr.appendChild(tdLbl);
     tr.appendChild(tdT);
     tr.appendChild(tdC);
     tr.appendChild(tdM);
     tr.appendChild(tdD);
     tbody.appendChild(tr);
+
+    if (manufacturerModel) {
+      const metaTr = document.createElement('tr');
+      metaTr.className = 'metarow';
+
+      const tdMeta = document.createElement('td');
+      tdMeta.colSpan = 2;
+      tdMeta.innerHTML = `<div class="leftmeta">${escapeHtml(manufacturerModel)}</div>`;
+      metaTr.appendChild(tdMeta);
+
+      tbody.appendChild(metaTr);
+    }
   }
 
   updatePageInfo();
+  updateSortHeaders();
   document.getElementById('subtitle').textContent =
     `Showing rows ${start+1}-${end} of ${filteredIdx.length} (filtered)`;
 }
@@ -1176,6 +2593,22 @@ document.getElementById('file').addEventListener('change', async (ev) => {
     applyData(normalizeInput(parsed));
   } catch (e){
     alert("Failed to load JSON: " + e);
+  }
+});
+
+document.getElementById('waypointsFile').addEventListener('change', async (ev) => {
+  const f = ev.target.files && ev.target.files[0];
+  if (!f) return;
+  try {
+    const text = await f.text();
+    const lookup = parseWaypointLookupText(text);
+    if (!lookup.size){
+      alert('Waypoints file did not contain any usable coordinates.');
+      return;
+    }
+    installWaypointLookup(lookup, f.name || 'waypoints file');
+  } catch (e) {
+    alert('Failed to load Waypoints.txt: ' + e);
   }
 });
 
@@ -1194,6 +2627,10 @@ document.getElementById('reset').addEventListener('click', () => {
   recomputeFilterAndRender();
 });
 
+document.getElementById('thTail').addEventListener('click', () => toggleSort('tail'));
+document.getElementById('thFlight').addEventListener('click', () => toggleSort('flight'));
+updateSortHeaders();
+
 document.getElementById('prev').addEventListener('click', () => { page--; clampPage(); renderPage(); });
 document.getElementById('next').addEventListener('click', () => { page++; clampPage(); renderPage(); });
 
@@ -1211,6 +2648,9 @@ document.getElementById('mapModal').addEventListener('click', (ev) => {
     document.getElementById('mapModal').style.display = 'none';
   }
 });
+
+tryLoadDefaultWaypointLookup();
+
 </script>
 </body>
 </html>

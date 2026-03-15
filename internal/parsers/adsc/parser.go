@@ -55,8 +55,27 @@ type PredictedRoute struct {
 
 // ContractRequest contains uplink contract request data.
 type ContractRequest struct {
-	ContractNum  int `json:"contract_num"`
-	IntervalSecs int `json:"interval_secs,omitempty"`
+	Kind         string                 `json:"kind,omitempty"`
+	ContractNum  int                    `json:"contract_num"`
+	IntervalSecs int                    `json:"interval_secs,omitempty"`
+	Groups       []ContractRequestGroup `json:"groups,omitempty"`
+}
+
+// ContractRequestGroup contains one decoded ADS-C uplink request tag.
+type ContractRequestGroup struct {
+	Tag                   int      `json:"tag"`
+	Name                  string   `json:"name"`
+	Modulus               *int     `json:"modulus,omitempty"`
+	IntervalSecs          *int     `json:"interval_secs,omitempty"`
+	ScalingFactor         *int     `json:"scaling_factor,omitempty"`
+	Rate                  *int     `json:"rate,omitempty"`
+	ProjectionMins        *int     `json:"projection_mins,omitempty"`
+	ThresholdNM           *float64 `json:"threshold_nm,omitempty"`
+	ThresholdFPM          *int     `json:"threshold_fpm,omitempty"`
+	HigherThan            *bool    `json:"higher_than,omitempty"`
+	FloorAlt              *int     `json:"floor_alt,omitempty"`
+	CeilingAlt            *int     `json:"ceiling_alt,omitempty"`
+	ReportWaypointChanges bool     `json:"report_waypoint_changes,omitempty"`
 }
 
 // Result represents a decoded ADS-C message (Label B6 or A6).
@@ -189,27 +208,217 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 }
 
 // decodeUplinkPayload decodes uplink (Label A6) contract request data.
-// Format: byte[0]=header(0x07), byte[1]=contract_num, byte[2]=interval_modulus, byte[3+]=additional_data
-// Interval is calculated as: modulus * 64 seconds
+// ADS-C uplink requests are tag-based. Reporting interval is carried in
+// request tag 11, where the top 2 bits are the scaling factor and the
+// bottom 6 bits are the rate.
 func decodeUplinkPayload(result *Result, data []byte) {
-	if len(data) < 3 {
+	if len(data) < 1 {
 		return
 	}
 
 	result.PayloadBytes = len(data)
-	result.MessageType = "uplink_contract_request"
 
-	// Byte 0 is header (typically 0x07).
-	// Byte 1 is contract number.
-	// Byte 2 is interval modulus (multiply by 64 to get seconds).
-	contractNum := int(data[1])
-	intervalModulus := int(data[2])
-	intervalSecs := intervalModulus * 64
+	switch data[0] {
+	case 0x07, 0x08, 0x09:
+		if len(data) < 2 {
+			return
+		}
 
-	result.ContractRequest = &ContractRequest{
-		ContractNum:  contractNum,
-		IntervalSecs: intervalSecs,
+		result.MessageType = "uplink_contract_request"
+		result.ContractRequest = &ContractRequest{
+			Kind:        decodeUplinkContractKind(data[0]),
+			ContractNum: int(data[1]),
+		}
+
+		for offset := 2; offset < len(data); {
+			tag := data[offset]
+			offset++
+
+			payloadLen, ok := uplinkRequestTagPayloadLen(tag)
+			if !ok || offset+payloadLen > len(data) {
+				break
+			}
+
+			group := decodeUplinkRequestGroup(tag, data[offset:offset+payloadLen])
+			if group != nil {
+				result.ContractRequest.Groups = append(result.ContractRequest.Groups, *group)
+				if group.IntervalSecs != nil {
+					result.ContractRequest.IntervalSecs = *group.IntervalSecs
+				}
+			}
+
+			offset += payloadLen
+		}
+	case 0x02:
+		if len(data) < 2 {
+			return
+		}
+		result.MessageType = "uplink_cancel_contract"
+		result.ContractRequest = &ContractRequest{Kind: "cancel", ContractNum: int(data[1])}
+	case 0x06:
+		if len(data) < 2 {
+			return
+		}
+		result.MessageType = "uplink_cancel_emergency"
+		result.ContractRequest = &ContractRequest{Kind: "cancel_emergency", ContractNum: int(data[1])}
+	case 0x01:
+		result.MessageType = "uplink_terminate_connection"
+		result.ContractRequest = &ContractRequest{Kind: "terminate"}
 	}
+}
+
+func decodeUplinkContractKind(tag byte) string {
+	switch tag {
+	case 0x07:
+		return "periodic"
+	case 0x08:
+		return "event"
+	case 0x09:
+		return "emergency_periodic"
+	default:
+		return ""
+	}
+}
+
+func uplinkRequestTagPayloadLen(tag byte) (int, bool) {
+	switch tag {
+	case 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12:
+		return 1, true
+	case 0x13:
+		return 4, true
+	case 0x14:
+		return 0, true
+	case 0x15:
+		return 2, true
+	default:
+		return 0, false
+	}
+}
+
+func decodeUplinkReportingInterval(value byte) int {
+	scalingFactor := int((value & 0xC0) >> 6)
+	switch scalingFactor {
+	case 2:
+		scalingFactor = 8
+	case 3:
+		scalingFactor = 64
+	}
+
+	rate := int(value & 0x3F)
+	return scalingFactor * (rate + 1)
+}
+
+func decodeUplinkRequestGroup(tag byte, payload []byte) *ContractRequestGroup {
+	group := &ContractRequestGroup{
+		Tag:  int(tag),
+		Name: uplinkRequestTagName(tag),
+	}
+
+	switch tag {
+	case 0x0A:
+		if len(payload) < 1 {
+			return nil
+		}
+		thresholdNM := float64(payload[0]) / 8.0
+		group.ThresholdNM = &thresholdNM
+	case 0x0B:
+		if len(payload) < 1 {
+			return nil
+		}
+		scalingFactor := decodeUplinkReportingScale(payload[0])
+		rate := int(payload[0] & 0x3F)
+		intervalSecs := scalingFactor * (rate + 1)
+		group.ScalingFactor = intPtr(scalingFactor)
+		group.Rate = intPtr(rate)
+		group.IntervalSecs = intPtr(intervalSecs)
+	case 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11:
+		if len(payload) < 1 {
+			return nil
+		}
+		group.Modulus = intPtr(int(payload[0]))
+	case 0x12:
+		if len(payload) < 1 {
+			return nil
+		}
+		thresholdFPM := int(int8(payload[0])) * 64
+		higherThan := thresholdFPM >= 0
+		if thresholdFPM < 0 {
+			thresholdFPM = -thresholdFPM
+		}
+		group.ThresholdFPM = intPtr(thresholdFPM)
+		group.HigherThan = boolPtr(higherThan)
+	case 0x13:
+		if len(payload) < 4 {
+			return nil
+		}
+		ceilingAlt := decodeAltitude(uint32(payload[0])<<8 | uint32(payload[1]))
+		floorAlt := decodeAltitude(uint32(payload[2])<<8 | uint32(payload[3]))
+		group.CeilingAlt = intPtr(ceilingAlt)
+		group.FloorAlt = intPtr(floorAlt)
+	case 0x14:
+		group.ReportWaypointChanges = true
+	case 0x15:
+		if len(payload) < 2 {
+			return nil
+		}
+		group.Modulus = intPtr(int(payload[0]))
+		group.ProjectionMins = intPtr(int(payload[1]))
+	default:
+		return nil
+	}
+
+	return group
+}
+
+func decodeUplinkReportingScale(value byte) int {
+	scalingFactor := int((value & 0xC0) >> 6)
+	switch scalingFactor {
+	case 2:
+		return 8
+	case 3:
+		return 64
+	default:
+		return scalingFactor
+	}
+}
+
+func uplinkRequestTagName(tag byte) string {
+	switch tag {
+	case 0x0A:
+		return "Report when lateral deviation exceeds"
+	case 0x0B:
+		return "Reporting interval"
+	case 0x0C:
+		return "Flight ID"
+	case 0x0D:
+		return "Predicted route"
+	case 0x0E:
+		return "Earth reference data"
+	case 0x0F:
+		return "Air reference data"
+	case 0x10:
+		return "Meteo data"
+	case 0x11:
+		return "Airframe ID"
+	case 0x12:
+		return "Report when vertical speed is"
+	case 0x13:
+		return "Report when altitude out of range"
+	case 0x14:
+		return "Report waypoint changes"
+	case 0x15:
+		return "Aircraft intent data"
+	default:
+		return fmt.Sprintf("Tag %d", tag)
+	}
+}
+
+func intPtr(value int) *int {
+	return &value
+}
+
+func boolPtr(value bool) *bool {
+	return &value
 }
 
 // decodePayloadData decodes the binary ADS-C payload using tag-based parsing.
@@ -673,9 +882,9 @@ func decodeAirRef(data []byte) *AirRef {
 	headingRaw := uint32((bits >> 27) & 0xFFF)
 	heading := decodeHeading(headingRaw)
 
-	// Mach speed: bits 13-25 (13 bits), stored as mach * 1000.
+	// Mach speed: bits 13-25 (13 bits), stored in 0.0005 Mach increments.
 	speedRaw := (bits >> 14) & 0x1FFF
-	mach := float64(speedRaw) / 1000.0
+	mach := float64(speedRaw) / 2000.0
 
 	// Vertical speed: bits 26-37 (12 bits).
 	vsRaw := uint32((bits >> 2) & 0xFFF)
