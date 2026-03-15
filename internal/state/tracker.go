@@ -18,10 +18,10 @@ type Tracker struct {
 	flights map[string]*FlightState
 
 	// Callbacks for change notifications.
-	onAircraftNew  func(*Aircraft)
-	onWaypointNew  func(*Waypoint)
-	onRouteNew     func(*Route)
-	onATISChanged  func(*ATIS)
+	onAircraftNew func(*Aircraft)
+	onWaypointNew func(*Waypoint)
+	onRouteNew    func(*Route)
+	onATISChanged func(*ATIS)
 }
 
 // NewTracker creates a new state tracker with the given database path.
@@ -38,6 +38,10 @@ func NewTracker(dbPath string) (*Tracker, error) {
 
 	// Initialise the schema.
 	if _, err := db.Exec(schema); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := ensureFlightStateColumns(db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -84,7 +88,7 @@ func (t *Tracker) OnATISChanged(fn func(*ATIS)) {
 // loadFlightStates loads existing flight states from the database into memory.
 func (t *Tracker) loadFlightStates() error {
 	rows, err := t.db.Query(`
-		SELECT key, icao_hex, registration, flight_number, origin, destination,
+		SELECT key, icao_hex, registration, flight_number, origin, destination, report_time,
 		       latitude, longitude, altitude, ground_speed, track, waypoints,
 		       first_seen, last_seen, msg_count
 		FROM flight_state
@@ -97,13 +101,13 @@ func (t *Tracker) loadFlightStates() error {
 
 	for rows.Next() {
 		var fs FlightState
-		var icaoHex, reg, flight, origin, dest sql.NullString
+		var icaoHex, reg, flight, origin, dest, reportTime sql.NullString
 		var lat, lon sql.NullFloat64
 		var alt, gs, track sql.NullInt64
 		var waypoints sql.NullString
 
 		err := rows.Scan(
-			&fs.Key, &icaoHex, &reg, &flight, &origin, &dest,
+			&fs.Key, &icaoHex, &reg, &flight, &origin, &dest, &reportTime,
 			&lat, &lon, &alt, &gs, &track, &waypoints,
 			&fs.FirstSeen, &fs.LastSeen, &fs.MsgCount,
 		)
@@ -116,6 +120,7 @@ func (t *Tracker) loadFlightStates() error {
 		fs.FlightNumber = flight.String
 		fs.Origin = origin.String
 		fs.Destination = dest.String
+		fs.ReportTime = reportTime.String
 		fs.Latitude = lat.Float64
 		fs.Longitude = lon.Float64
 		fs.Altitude = int(alt.Int64)
@@ -189,6 +194,9 @@ func (t *Tracker) UpdateFlight(update FlightUpdate) (*FlightState, bool) {
 	if update.Destination != "" {
 		fs.Destination = update.Destination
 	}
+	if update.ReportTime != "" {
+		fs.ReportTime = update.ReportTime
+	}
 
 	// Update position (only if non-zero).
 	if update.Latitude != 0 || update.Longitude != 0 {
@@ -239,6 +247,7 @@ type FlightUpdate struct {
 	FlightNumber string
 	Origin       string
 	Destination  string
+	ReportTime   string
 	Latitude     float64
 	Longitude    float64
 	Altitude     int
@@ -254,16 +263,17 @@ func (t *Tracker) saveFlightState(fs *FlightState) {
 	waypoints, _ := json.Marshal(fs.Waypoints)
 
 	_, err := t.db.Exec(`
-		INSERT INTO flight_state (key, icao_hex, registration, flight_number, origin, destination,
+		INSERT INTO flight_state (key, icao_hex, registration, flight_number, origin, destination, report_time,
 		                          latitude, longitude, altitude, ground_speed, track, waypoints,
 		                          first_seen, last_seen, msg_count)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(key) DO UPDATE SET
 			icao_hex = excluded.icao_hex,
 			registration = excluded.registration,
 			flight_number = excluded.flight_number,
 			origin = excluded.origin,
 			destination = excluded.destination,
+			report_time = excluded.report_time,
 			latitude = excluded.latitude,
 			longitude = excluded.longitude,
 			altitude = excluded.altitude,
@@ -273,12 +283,45 @@ func (t *Tracker) saveFlightState(fs *FlightState) {
 			last_seen = excluded.last_seen,
 			msg_count = excluded.msg_count
 	`,
-		fs.Key, fs.ICAOHex, fs.Registration, fs.FlightNumber, fs.Origin, fs.Destination,
+		fs.Key, fs.ICAOHex, fs.Registration, fs.FlightNumber, fs.Origin, fs.Destination, fs.ReportTime,
 		fs.Latitude, fs.Longitude, fs.Altitude, fs.GroundSpeed, fs.Track, string(waypoints),
 		fs.FirstSeen, fs.LastSeen, fs.MsgCount,
 	)
 	// Silently ignore errors - flight state is best-effort.
 	_ = err
+}
+
+func ensureFlightStateColumns(db *sql.DB) error {
+	rows, err := db.Query("PRAGMA table_info(flight_state)")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+
+	hasReportTime := false
+	for rows.Next() {
+		var cid int
+		var name string
+		var dataType string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == "report_time" {
+			hasReportTime = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasReportTime {
+		return nil
+	}
+
+	_, err = db.Exec("ALTER TABLE flight_state ADD COLUMN report_time TEXT")
+	return err
 }
 
 // updateAircraft updates or inserts an aircraft record.
@@ -695,11 +738,11 @@ func (t *Tracker) MarkRouteSynced(id int64) error {
 
 // Stats returns statistics about tracked data.
 type Stats struct {
-	ActiveFlights   int
-	TotalAircraft   int
-	TotalWaypoints  int
-	TotalRoutes     int
-	UnsyncedCount   int
+	ActiveFlights  int
+	TotalAircraft  int
+	TotalWaypoints int
+	TotalRoutes    int
+	UnsyncedCount  int
 }
 
 func (t *Tracker) GetStats() Stats {

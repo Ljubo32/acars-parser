@@ -56,6 +56,16 @@ var Formats = []patterns.Format{
 			`(?P<eta>\d+),\s*(?P<track>\d+)`,
 		Fields: []string{"waypoint", "lat_dir", "lat", "lon_dir", "lon", "altitude", "ground_speed", "eta", "track"},
 	},
+	// POSA position format with two waypoint references and aircraft state data.
+	// Example: POSA1N42851E 16405,GIS40  ,092609,380,ROTAR  ,100331,,-58, 22, 306,844
+	{
+		Name: "posa_position",
+		Pattern: `^(?P<reference>POSA)(?P<variant>\d)(?P<lat_dir>[NS])(?P<lat>\d{5})(?P<lon_dir>[EW])\s*(?P<lon>\d{5,6}),` +
+			`(?P<current_waypoint>[A-Z0-9-]{2,8})\s*,(?P<current_eta>\d{6}),(?P<altitude>\d+),` +
+			`(?P<next_waypoint>[A-Z0-9-]{2,8})\s*,(?P<next_eta>\d{6}),,(?P<temperature>-?\d+|\*{5}),\s*` +
+			`(?P<wind>[-\d.]+),\s*(?P<fuel_on_board>\d+),\s*(?P<mach>\d{1,3})$`,
+		Fields: []string{"reference", "variant", "lat_dir", "lat", "lon_dir", "lon", "current_waypoint", "current_eta", "altitude", "next_waypoint", "next_eta", "temperature", "wind", "fuel_on_board", "mach"},
+	},
 	// AUTPOS format.
 	// Example: 035234/AUTPOS/LLD N440853 W0915239
 	{

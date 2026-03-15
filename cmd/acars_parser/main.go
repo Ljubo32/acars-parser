@@ -21,22 +21,51 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"acars_parser/internal/acars"
+	"acars_parser/internal/airlines"
 	_ "acars_parser/internal/parsers" // register all parsers via init()
+	"acars_parser/internal/patterns"
 	"acars_parser/internal/registry"
 )
 
+var (
+	pdcFlightRe       = regexp.MustCompile(`\b([A-Z0-9]{3,8})\s+CLRD\s+TO\s+([A-Z]{4})\b`)
+	pdcOriginHeaderRe = regexp.MustCompile(`(?s)/[A-Z]+\.[A-Z0-9]+/[A-Z]+\s+\d{4}\s+\d{6}\s+([A-Z]{4})\b`)
+	pdcDestinationRe  = regexp.MustCompile(`\bCLRD\s+TO\s+([A-Z]{4})\b`)
+	fsmHeaderRe       = regexp.MustCompile(`(?s)/[A-Z]+\.[A-Z0-9]+/FSM\s+\d{4}\s+\d{6}\s+([A-Z]{4})\s+([A-Z0-9]{3,8})\b`)
+)
+
 type ExtractOut struct {
-	Message *acars.Message `json:"message"`
+	Message *OutputMessage `json:"message"`
 	Results []any          `json:"results,omitempty"`
+}
+
+type OutputMessage struct {
+	ID          acars.FlexInt64 `json:"id"`
+	Source      string          `json:"source"`
+	Timestamp   string          `json:"timestamp"`
+	Tail        string          `json:"tail"`
+	Flight      string          `json:"flight,omitempty"`
+	FlightID    string          `json:"flight_id,omitempty"`
+	Latitude    float64         `json:"latitude,omitempty"`
+	Longitude   float64         `json:"longitude,omitempty"`
+	Departing   string          `json:"departing_airport,omitempty"`
+	Destination string          `json:"destination_airport,omitempty"`
+	Text        string          `json:"text"`
+	Label       string          `json:"label"`
+	Frequency   float64         `json:"frequency"`
+	Airframe    *acars.Airframe `json:"airframe,omitempty"`
+	Station     *acars.Station  `json:"station,omitempty"`
 }
 
 type Stats struct {
 	Lines          int
+	ParsedJAERO    int
 	ParsedNATS     int
 	ParsedFlat     int
 	ParsedNested   int
@@ -47,13 +76,13 @@ type Stats struct {
 
 func usage(w io.Writer) {
 	fmt.Fprintln(w, "acars_parser (extract) - commands:")
-	fmt.Fprintln(w, "  extract  - parse JSONL file and output JSON")
+	fmt.Fprintln(w, "  extract  - parse JSONL or JAERO TXT file and output JSON")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  acars_parser extract -input messages.jsonl [-output out.json] [-pretty] [-all] [-stats]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Notes:")
-	fmt.Fprintln(w, "  - Input must be JSONL (one JSON object per line).")
+	fmt.Fprintln(w, "  - Input may be JSONL (one JSON object per line) or a JAERO TXT log.")
 	fmt.Fprintln(w, "  - For dumpvdl2/dumphfdl logs, the tool will try to find label/text in nested paths.")
 	fmt.Fprintln(w, "")
 }
@@ -107,42 +136,20 @@ func runExtract(args []string) {
 	out := make([]ExtractOut, 0, 1024)
 	st := &Stats{}
 
+	firstLine := ""
 	for scanner.Scan() {
 		st.Lines++
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
+		firstLine = strings.TrimSpace(scanner.Text())
+		if firstLine != "" {
+			break
 		}
-		b := []byte(line)
+	}
 
-		msgs, kind := decodeToMessage(b)
-		if len(msgs) == 0 {
-			st.SkippedNoLabel++
-			continue
-		}
-		switch kind {
-		case "nats":
-			st.ParsedNATS++
-		case "flat":
-			st.ParsedFlat++
-		case "nested":
-			st.ParsedNested++
-		}
-
-		// Process all messages extracted from this line
-		for _, msg := range msgs {
-			if msg == nil || (strings.TrimSpace(msg.Label) == "" && strings.TrimSpace(msg.Text) == "") {
-				continue
-			}
-			var appended bool
-			var matched bool
-			out, appended, matched = appendOut(out, msg, *includeAll)
-			if appended {
-				st.Emitted++
-			}
-			if matched {
-				st.Matched++
-			}
+	if firstLine != "" {
+		if looksLikeJAEROHeader(firstLine) {
+			out = processJAEROInput(scanner, firstLine, out, *includeAll, st)
+		} else {
+			out = processJSONLInput(scanner, firstLine, out, *includeAll, st)
 		}
 	}
 
@@ -174,13 +181,330 @@ func runExtract(args []string) {
 
 	if *showStats {
 		fmt.Fprintf(os.Stderr,
-			"stats: lines=%d parsed(nats=%d flat=%d nested=%d) skipped(no_label_text)=%d emitted=%d matched=%d\n",
-			st.Lines, st.ParsedNATS, st.ParsedFlat, st.ParsedNested, st.SkippedNoLabel, st.Emitted, st.Matched,
+			"stats: lines=%d parsed(jaero=%d nats=%d flat=%d nested=%d) skipped(no_label_text)=%d emitted=%d matched=%d\n",
+			st.Lines, st.ParsedJAERO, st.ParsedNATS, st.ParsedFlat, st.ParsedNested, st.SkippedNoLabel, st.Emitted, st.Matched,
 		)
 	}
 }
 
+func processJSONLInput(scanner *bufio.Scanner, firstLine string, out []ExtractOut, includeAll bool, st *Stats) []ExtractOut {
+	out = processJSONLLine(firstLine, out, includeAll, st)
+	for scanner.Scan() {
+		st.Lines++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		out = processJSONLLine(line, out, includeAll, st)
+	}
+	return out
+}
+
+func processJSONLLine(line string, out []ExtractOut, includeAll bool, st *Stats) []ExtractOut {
+	b := []byte(line)
+
+	msgs, kind := decodeToMessage(b)
+	if len(msgs) == 0 {
+		st.SkippedNoLabel++
+		return out
+	}
+
+	switch kind {
+	case "nats":
+		st.ParsedNATS++
+	case "flat":
+		st.ParsedFlat++
+	case "nested":
+		st.ParsedNested++
+	}
+
+	for _, msg := range msgs {
+		if msg == nil || (strings.TrimSpace(msg.Label) == "" && strings.TrimSpace(msg.Text) == "") {
+			continue
+		}
+		var appended bool
+		var matched bool
+		out, appended, matched = appendOut(out, msg, includeAll)
+		if appended {
+			st.Emitted++
+		}
+		if matched {
+			st.Matched++
+		}
+	}
+
+	return out
+}
+
+func processJAEROInput(scanner *bufio.Scanner, firstHeader string, out []ExtractOut, includeAll bool, st *Stats) []ExtractOut {
+	currentHeader := strings.TrimSpace(firstHeader)
+	body := make([]string, 0, 8)
+
+	emit := func() {
+		if currentHeader == "" {
+			return
+		}
+		st.ParsedJAERO++
+		var appended bool
+		var matched bool
+		out, appended, matched = appendJAEROBlock(out, currentHeader, body, includeAll)
+		if appended {
+			st.Emitted++
+		}
+		if matched {
+			st.Matched++
+		}
+		if !appended {
+			st.SkippedNoLabel++
+		}
+		body = body[:0]
+	}
+
+	for scanner.Scan() {
+		st.Lines++
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+		if looksLikeJAEROHeader(trimmed) {
+			emit()
+			currentHeader = trimmed
+			continue
+		}
+		if currentHeader == "" {
+			continue
+		}
+		body = append(body, line)
+	}
+
+	emit()
+	return out
+}
+
+func appendJAEROBlock(out []ExtractOut, header string, body []string, includeAll bool) ([]ExtractOut, bool, bool) {
+	msg := parseJAEROBlock(header, body)
+	if msg == nil {
+		return out, false, false
+	}
+	return appendOut(out, msg, includeAll)
+}
+
+func parseJAEROBlock(header string, body []string) *acars.Message {
+	timestamp, tail, label, airframe, ok := parseJAEROHeader(header)
+	if !ok {
+		return nil
+	}
+
+	text := extractJAEROPayload(body)
+	if text == "" {
+		return nil
+	}
+
+	return &acars.Message{
+		Source:    "jaero",
+		Timestamp: timestamp,
+		Tail:      tail,
+		Text:      text,
+		Label:     label,
+		Airframe:  airframe,
+	}
+}
+
+func parseJAEROHeader(header string) (string, string, string, *acars.Airframe, bool) {
+	fields := strings.Fields(strings.TrimSpace(header))
+	if len(fields) < 8 || !looksLikeJAEROHeader(header) {
+		return "", "", "", nil, false
+	}
+
+	parsedTime, err := time.Parse("15:04:05 02-01-06 MST", fields[0]+" "+fields[1]+" "+fields[2])
+	if err != nil {
+		return "", "", "", nil, false
+	}
+
+	bangIdx := strings.Index(header, " ! ")
+	if bangIdx < 0 {
+		return "", "", "", nil, false
+	}
+
+	leftFields := strings.Fields(strings.TrimSpace(header[:bangIdx]))
+	if len(leftFields) == 0 {
+		return "", "", "", nil, false
+	}
+	tail := strings.TrimSpace(leftFields[len(leftFields)-1])
+	if tail == "" {
+		return "", "", "", nil, false
+	}
+
+	aes := ""
+	for _, field := range leftFields {
+		if strings.HasPrefix(field, "AES:") {
+			aes = strings.ToUpper(strings.TrimSpace(strings.TrimPrefix(field, "AES:")))
+			break
+		}
+	}
+
+	rightFields := strings.Fields(strings.TrimSpace(header[bangIdx+3:]))
+	if len(rightFields) < 2 {
+		return "", "", "", nil, false
+	}
+	label := strings.TrimSpace(rightFields[0])
+	if label == "" {
+		return "", "", "", nil, false
+	}
+
+	airframeDescription := ""
+	if len(rightFields) > 2 {
+		airframeDescription = strings.TrimSpace(strings.Join(rightFields[2:], " "))
+	}
+
+	var airframe *acars.Airframe
+	if aes != "" || airframeDescription != "" || tail != "" {
+		airframe = &acars.Airframe{
+			Tail:              tail,
+			ICAO:              aes,
+			ManufacturerModel: airframeDescription,
+		}
+	}
+
+	return parsedTime.UTC().Format(time.RFC3339), tail, label, airframe, true
+}
+
+func extractJAEROPayload(body []string) string {
+	payloadLines := make([]string, 0, len(body))
+	started := false
+
+	for _, rawLine := range body {
+		trimmed := strings.TrimSpace(rawLine)
+		if !started {
+			if trimmed == "" {
+				continue
+			}
+			if trimmed == "-" {
+				return ""
+			}
+			if looksLikeJAERODecoderCommentaryLine(trimmed) {
+				continue
+			}
+			started = true
+		}
+
+		if trimmed == "" {
+			break
+		}
+		if !looksLikeJAEROPayloadLine(trimmed) {
+			break
+		}
+
+		payloadLines = append(payloadLines, trimmed)
+	}
+
+	if len(payloadLines) == 0 {
+		return ""
+	}
+
+	joined := joinJAEROPayloadLines(payloadLines)
+	return normaliseJAEROPayload(joined)
+}
+
+func looksLikeJAEROPayloadLine(line string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" || line == "-" {
+		return false
+	}
+	if looksLikeJAEROHeader(line) || looksLikeJAERODecoderCommentaryLine(line) {
+		return false
+	}
+	return true
+}
+
+func looksLikeJAERODecoderCommentaryLine(line string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return false
+	}
+
+	commentaryPrefixes := []string{
+		"FANS-1/A ",
+		"CPDLC ",
+		"CPDLC Uplink Message:",
+		"CPDLC Downlink Message:",
+		"ADS-C message:",
+		"Header:",
+		"Message data:",
+		"Msg ID:",
+		"Timestamp:",
+		"Facility designation:",
+		"Flight level:",
+		"Fix:",
+		"Position:",
+		"ATC CLEARANCE",
+		"REQUEST POSITION REPORT",
+	}
+	for _, prefix := range commentaryPrefixes {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func joinJAEROPayloadLines(lines []string) string {
+	if len(lines) == 0 {
+		return ""
+	}
+
+	var builder strings.Builder
+	builder.WriteString(lines[0])
+	for i := 1; i < len(lines); i++ {
+		current := strings.TrimSpace(lines[i])
+		previous := strings.TrimSpace(lines[i-1])
+		if shouldJoinJAEROPayloadInline(previous, current) {
+			builder.WriteString(current)
+			continue
+		}
+		builder.WriteByte('\n')
+		builder.WriteString(current)
+	}
+
+	return builder.String()
+}
+
+func shouldJoinJAEROPayloadInline(previous string, current string) bool {
+	if current == "" {
+		return false
+	}
+	if strings.HasPrefix(current, "/") || strings.HasPrefix(current, "#") || strings.HasPrefix(current, "- #") {
+		return true
+	}
+	return !strings.ContainsAny(previous, " \t") && !strings.ContainsAny(current, " \t")
+}
+
+func normaliseJAEROPayload(payload string) string {
+	payload = strings.TrimSpace(payload)
+	payload = strings.ReplaceAll(payload, "- #MD", "")
+	payload = strings.ReplaceAll(payload, "- #M1", "")
+	payload = strings.TrimPrefix(payload, "- ")
+	return strings.TrimSpace(payload)
+}
+
+func looksLikeJAEROHeader(line string) bool {
+	fields := strings.Fields(strings.TrimSpace(line))
+	if len(fields) < 8 {
+		return false
+	}
+	if fields[2] != "UTC" {
+		return false
+	}
+	if !strings.HasPrefix(fields[3], "AES:") || !strings.HasPrefix(fields[4], "GES:") {
+		return false
+	}
+	if _, err := time.Parse("15:04:05 02-01-06 MST", fields[0]+" "+fields[1]+" "+fields[2]); err != nil {
+		return false
+	}
+	return strings.Contains(line, " ! ")
+}
+
 func appendOut(out []ExtractOut, msg *acars.Message, includeAll bool) ([]ExtractOut, bool, bool) {
+	enrichMessageFromText(msg)
 	results := registry.Default().Dispatch(msg)
 	if !includeAll && len(results) == 0 {
 		return out, false, false
@@ -189,8 +513,205 @@ func appendOut(out []ExtractOut, msg *acars.Message, includeAll bool) ([]Extract
 	for _, r := range results {
 		rany = append(rany, r) // keep concrete types for JSON marshal
 	}
-	out = append(out, ExtractOut{Message: msg, Results: rany})
+	out = append(out, ExtractOut{Message: newOutputMessage(msg), Results: rany})
 	return out, true, len(results) > 0
+}
+
+func enrichMessageFromText(msg *acars.Message) {
+	if msg == nil {
+		return
+	}
+
+	flightNumber, cleanTail, destinationAirport := parseAFNMetadataFromText(msg.Text)
+	departingAirport := ""
+	if flightNumber == "" {
+		flightNumber = parseFPNFlightFromText(msg.Text)
+	}
+	if flightNumber == "" || destinationAirport == "" || departingAirport == "" {
+		pdcFlightNumber, pdcDepartingAirport, pdcDestinationAirport := parsePDCMetadataFromText(msg.Text)
+		if flightNumber == "" {
+			flightNumber = pdcFlightNumber
+		}
+		if departingAirport == "" {
+			departingAirport = pdcDepartingAirport
+		}
+		if destinationAirport == "" {
+			destinationAirport = pdcDestinationAirport
+		}
+	}
+	if flightNumber == "" || departingAirport == "" {
+		fsmFlightNumber, fsmDepartingAirport := parseFSMMetadataFromText(msg.Text)
+		if flightNumber == "" {
+			flightNumber = fsmFlightNumber
+		}
+		if departingAirport == "" {
+			departingAirport = fsmDepartingAirport
+		}
+	}
+	if flightNumber == "" && cleanTail == "" && destinationAirport == "" && departingAirport == "" {
+		return
+	}
+
+	if cleanTail != "" {
+		if msg.Airframe == nil {
+			msg.Airframe = &acars.Airframe{}
+		}
+		if strings.TrimSpace(msg.Airframe.Tail) == "" || strings.HasPrefix(strings.TrimSpace(msg.Airframe.Tail), ".") {
+			msg.Airframe.Tail = cleanTail
+		}
+		if strings.TrimSpace(msg.Tail) == "" {
+			msg.Tail = cleanTail
+		}
+	}
+
+	if flightNumber == "" && destinationAirport == "" && departingAirport == "" {
+		return
+	}
+
+	if msg.Flight == nil {
+		msg.Flight = &acars.Flight{}
+	}
+	if strings.TrimSpace(msg.Flight.Flight) == "" && flightNumber != "" {
+		msg.Flight.Flight = airlines.TranslateFlight(strings.TrimSpace(flightNumber))
+	}
+	if strings.TrimSpace(msg.Flight.DepartingAirport) == "" && departingAirport != "" {
+		msg.Flight.DepartingAirport = strings.TrimSpace(departingAirport)
+	}
+	if strings.TrimSpace(msg.Flight.DestinationAirport) == "" && destinationAirport != "" {
+		msg.Flight.DestinationAirport = strings.TrimSpace(destinationAirport)
+	}
+	normaliseMessageFlight(msg)
+}
+
+func parseAFNMetadataFromText(text string) (flightNumber string, cleanTail string, destinationAirport string) {
+	text = strings.TrimSpace(text)
+	if !strings.Contains(text, ".AFN/") {
+		return "", "", ""
+	}
+
+	fmhIdx := strings.Index(text, "/FMH")
+	if fmhIdx >= 0 {
+		rest := text[fmhIdx+4:]
+		commaIdx := strings.IndexByte(rest, ',')
+		if commaIdx > 0 {
+			flightNumber = strings.TrimSpace(rest[:commaIdx])
+			tailAndRest := rest[commaIdx+1:]
+			fields := strings.Split(tailAndRest, ",")
+			if len(fields) > 0 {
+				cleanTail = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(fields[0]), "."))
+			}
+		}
+	}
+
+	fakIdx := strings.Index(text, "/FAK0,")
+	if fakIdx >= 0 {
+		rest := text[fakIdx+6:]
+		endIdx := strings.IndexByte(rest, '/')
+		if endIdx >= 0 {
+			destinationAirport = strings.TrimSpace(rest[:endIdx])
+		} else {
+			destinationAirport = strings.TrimSpace(rest)
+		}
+	}
+
+	if len(destinationAirport) != 4 {
+		destinationAirport = ""
+	}
+
+	return strings.TrimSpace(flightNumber), strings.TrimSpace(cleanTail), destinationAirport
+}
+
+func parseFPNFlightFromText(text string) string {
+	text = strings.TrimSpace(strings.ToUpper(text))
+	if !strings.HasPrefix(text, "FPN/") {
+		return ""
+	}
+
+	match := patterns.FPNFlightPattern.FindStringSubmatch(text)
+	if len(match) < 2 {
+		return ""
+	}
+
+	return strings.TrimSpace(match[1])
+}
+
+func parsePDCMetadataFromText(text string) (flightNumber string, departingAirport string, destinationAirport string) {
+	text = strings.TrimSpace(strings.ToUpper(text))
+	if text == "" {
+		return "", "", ""
+	}
+	if !strings.Contains(text, "PDC") && !strings.Contains(text, "CLRD TO") {
+		return "", "", ""
+	}
+
+	if match := pdcFlightRe.FindStringSubmatch(text); len(match) == 3 {
+		flightNumber = strings.TrimSpace(match[1])
+		destinationAirport = strings.TrimSpace(match[2])
+	}
+	if match := pdcOriginHeaderRe.FindStringSubmatch(text); len(match) == 2 {
+		departingAirport = strings.TrimSpace(match[1])
+	}
+	if destinationAirport == "" {
+		if match := pdcDestinationRe.FindStringSubmatch(text); len(match) == 2 {
+			destinationAirport = strings.TrimSpace(match[1])
+		}
+	}
+	if flightNumber == "" {
+		tokens := strings.Fields(text)
+		flightNumber = strings.TrimSpace(patterns.ExtractFlightNumber(text, tokens))
+	}
+	return flightNumber, strings.TrimSpace(departingAirport), strings.TrimSpace(destinationAirport)
+}
+
+func parseFSMMetadataFromText(text string) (flightNumber string, departingAirport string) {
+	text = strings.TrimSpace(strings.ToUpper(text))
+	if text == "" || !strings.Contains(text, "FS1/FSM") {
+		return "", ""
+	}
+
+	match := fsmHeaderRe.FindStringSubmatch(text)
+	if len(match) != 3 {
+		return "", ""
+	}
+
+	departingAirport = strings.TrimSpace(match[1])
+	flightNumber = strings.TrimSpace(match[2])
+	if len(departingAirport) != 4 || flightNumber == "" {
+		return "", ""
+	}
+
+	return flightNumber, departingAirport
+}
+
+func newOutputMessage(msg *acars.Message) *OutputMessage {
+	if msg == nil {
+		return nil
+	}
+
+	normaliseMessageFlight(msg)
+
+	out := &OutputMessage{
+		ID:        msg.ID,
+		Source:    msg.Source,
+		Timestamp: msg.Timestamp,
+		Tail:      msg.Tail,
+		Text:      msg.Text,
+		Label:     msg.Label,
+		Frequency: msg.Frequency,
+		Airframe:  msg.Airframe,
+		Station:   msg.Station,
+	}
+
+	if msg.Flight != nil {
+		out.Flight = airlines.TranslateFlight(strings.TrimSpace(msg.Flight.Flight))
+		out.FlightID = strings.TrimSpace(msg.Flight.ID)
+		out.Latitude = msg.Flight.Latitude
+		out.Longitude = msg.Flight.Longitude
+		out.Departing = strings.TrimSpace(msg.Flight.DepartingAirport)
+		out.Destination = strings.TrimSpace(msg.Flight.DestinationAirport)
+	}
+
+	return out
 }
 
 func marshalJSON(v any, pretty bool) ([]byte, error) {
@@ -205,6 +726,7 @@ func decodeToMessage(b []byte) ([]*acars.Message, string) {
 	var w acars.NATSWrapper
 	if err := json.Unmarshal(b, &w); err == nil && w.Message != nil {
 		if msg := w.ToMessage(); msg != nil && (msg.Label != "" || msg.Text != "") {
+			normaliseMessageFlight(msg)
 			return []*acars.Message{msg}, "nats"
 		}
 	}
@@ -212,7 +734,12 @@ func decodeToMessage(b []byte) ([]*acars.Message, string) {
 	// 2) Flat message (only accept if it actually contains label/text)
 	var m acars.Message
 	if err := json.Unmarshal(b, &m); err == nil {
+		var flatRoot map[string]any
+		if err := json.Unmarshal(b, &flatRoot); err == nil {
+			enrichMessageFlight(&m, flatRoot)
+		}
 		if strings.TrimSpace(m.Label) != "" || strings.TrimSpace(m.Text) != "" {
+			normaliseMessageFlight(&m)
 			return []*acars.Message{&m}, "flat"
 		}
 	}
@@ -277,65 +804,20 @@ func buildMessagesFromNested(obj any) []*acars.Message {
 
 	// If we have both outer and MIAM content, create both messages
 	if strings.TrimSpace(outerLabel) != "" || strings.TrimSpace(outerText) != "" {
-		// Extract common metadata
-		tail := firstString(root,
-			"tail",
-			"airframe.tail",
-			"vdl2.avlc.acars.reg",
-			"vdl2.avlc.acars.tail",
-			"hfdl.lpdu.hfnpdu.acars.reg",
-		)
-
-		ts := firstString(root,
-			"timestamp",
-			"message.timestamp",
-		)
-
-		// If no timestamp string, try epoch seconds found in dumpvdl2/dumphfdl logs.
-		if ts == "" {
-			sec := firstInt64(root,
-				"vdl2.t.sec",
-				"hfdl.t.sec",
-				"t.sec",
-			)
-			usec := firstInt64(root,
-				"vdl2.t.usec",
-				"hfdl.t.usec",
-				"t.usec",
-			)
-			if sec > 0 {
-				t := time.Unix(sec, usec*1000).UTC()
-				ts = t.Format(time.RFC3339Nano)
-			}
-		}
-
-		freq := firstFloat64(root,
-			"frequency",
-			"message.frequency",
-			"vdl2.freq",
-			"hfdl.freq",
-		)
-		// Many decoder logs store Hz as int (e.g. 136975000). Convert to MHz if large.
-		if freq > 1_000_000 {
-			freq = freq / 1_000_000.0
-		}
-
-		src := firstString(root,
-			"source",
-			"vdl2.app.name",
-			"hfdl.app.name",
-			"app.name",
-		)
+		meta := extractNestedMessageMetadata(root)
 
 		// Create outer message (e.g., MA with compressed text)
 		outerMsg := &acars.Message{
 			Label:     outerLabel,
 			Text:      outerText,
-			Tail:      tail,
-			Timestamp: ts,
-			Frequency: freq,
-			Source:    src,
+			Tail:      meta.tail,
+			Timestamp: meta.timestamp,
+			Frequency: meta.frequency,
+			Source:    meta.source,
+			Airframe:  meta.airframe,
+			Flight:    extractFlight(root),
 		}
+		normaliseMessageFlight(outerMsg)
 		msgs = append(msgs, outerMsg)
 
 		// If MIAM decoded content exists, create second message with decoded content
@@ -344,16 +826,218 @@ func buildMessagesFromNested(obj any) []*acars.Message {
 			miamMsg := &acars.Message{
 				Label:     "MB",
 				Text:      miamText,
-				Tail:      tail,
-				Timestamp: ts,
-				Frequency: freq,
-				Source:    src,
+				Tail:      meta.tail,
+				Timestamp: meta.timestamp,
+				Frequency: meta.frequency,
+				Source:    meta.source,
+				Airframe:  meta.airframe,
+				Flight:    extractFlight(root),
 			}
+			normaliseMessageFlight(miamMsg)
 			msgs = append(msgs, miamMsg)
 		}
 	}
 
+	if len(msgs) == 0 {
+		if synthetic := buildSyntheticHFDLDataMessage(root); synthetic != nil {
+			msgs = append(msgs, synthetic)
+		}
+	}
+
 	return msgs
+}
+
+type nestedMessageMeta struct {
+	tail      string
+	timestamp string
+	frequency float64
+	source    string
+	airframe  *acars.Airframe
+}
+
+func extractNestedMessageMetadata(root map[string]any) nestedMessageMeta {
+	tail := firstString(root,
+		"tail",
+		"airframe.tail",
+		"vdl2.avlc.acars.reg",
+		"vdl2.avlc.acars.tail",
+		"hfdl.lpdu.hfnpdu.acars.reg",
+	)
+
+	ts := firstString(root,
+		"timestamp",
+		"message.timestamp",
+	)
+	if ts == "" {
+		sec := firstInt64(root,
+			"vdl2.t.sec",
+			"hfdl.t.sec",
+			"t.sec",
+		)
+		usec := firstInt64(root,
+			"vdl2.t.usec",
+			"hfdl.t.usec",
+			"t.usec",
+		)
+		if sec > 0 {
+			t := time.Unix(sec, usec*1000).UTC()
+			ts = t.Format(time.RFC3339Nano)
+		}
+	}
+
+	freq := firstFloat64(root,
+		"frequency",
+		"message.frequency",
+		"vdl2.freq",
+		"hfdl.freq",
+	)
+	if freq > 1_000_000 {
+		freq = freq / 1_000_000.0
+	}
+
+	src := firstString(root,
+		"source",
+		"vdl2.app.name",
+		"hfdl.app.name",
+		"app.name",
+	)
+
+	icao := firstString(root,
+		"airframe.icao",
+		"hfdl.lpdu.ac_info.icao",
+	)
+
+	var airframe *acars.Airframe
+	if strings.TrimSpace(tail) != "" || strings.TrimSpace(icao) != "" {
+		airframe = &acars.Airframe{
+			Tail: strings.TrimSpace(tail),
+			ICAO: strings.ToUpper(strings.TrimSpace(icao)),
+		}
+	}
+
+	return nestedMessageMeta{
+		tail:      tail,
+		timestamp: ts,
+		frequency: freq,
+		source:    src,
+		airframe:  airframe,
+	}
+}
+
+func buildSyntheticHFDLDataMessage(root map[string]any) *acars.Message {
+	hfnpduType := strings.TrimSpace(firstString(root, "hfdl.lpdu.hfnpdu.type.name"))
+	if hfnpduType == "" || !strings.HasSuffix(strings.ToLower(hfnpduType), "data") {
+		return nil
+	}
+
+	flight := extractFlight(root)
+	if flight == nil || strings.TrimSpace(flight.ID) == "" {
+		return nil
+	}
+	if flight.Latitude == 0 && flight.Longitude == 0 {
+		return nil
+	}
+
+	meta := extractNestedMessageMetadata(root)
+	text := fmt.Sprintf("HFDL %s", hfnpduType)
+	if gsID := firstString(root, "hfdl.lpdu.dst.id"); strings.TrimSpace(gsID) != "" {
+		text = fmt.Sprintf("HFDL %s GS %s", hfnpduType, strings.TrimSpace(gsID))
+	}
+
+	msg := &acars.Message{
+		Label:     "HFDL",
+		Text:      text,
+		Tail:      meta.tail,
+		Timestamp: meta.timestamp,
+		Frequency: meta.frequency,
+		Source:    meta.source,
+		Airframe:  meta.airframe,
+		Flight:    flight,
+	}
+	normaliseMessageFlight(msg)
+	return msg
+}
+
+func enrichMessageFlight(msg *acars.Message, root map[string]any) {
+	if msg == nil || root == nil {
+		return
+	}
+
+	if flight := extractFlight(root); flight != nil {
+		msg.Flight = flight
+	}
+}
+
+func extractFlight(root map[string]any) *acars.Flight {
+	flightNumber := firstString(root,
+		"flight",
+		"message.flight",
+		"acars.flight",
+		"vdl2.avlc.acars.flight",
+		"hfdl.lpdu.hfnpdu.acars.flight",
+	)
+
+	flightID := firstString(root,
+		"flight_id",
+		"message.flight_id",
+		"hfdl.lpdu.hfnpdu.flight_id",
+		"vdl2.avlc.x25.clnp.cotp.x225_spdu.x227_apdu.context_mgmt.cm_aircraft_message.data.atn_context_mgmt_logon_request.flight_id",
+	)
+
+	departureAirport := firstString(root,
+		"departure_airport",
+		"message.departure_airport",
+		"vdl2.avlc.x25.clnp.cotp.x225_spdu.x227_apdu.context_mgmt.cm_aircraft_message.data.atn_context_mgmt_logon_request.departure_airport",
+	)
+
+	destinationAirport := firstString(root,
+		"destination_airport",
+		"message.destination_airport",
+		"vdl2.avlc.x25.clnp.cotp.x225_spdu.x227_apdu.context_mgmt.cm_aircraft_message.data.atn_context_mgmt_logon_request.destination_airport",
+	)
+
+	latitude := firstFloat64(root,
+		"latitude",
+		"message.latitude",
+		"hfdl.lpdu.hfnpdu.pos.lat",
+	)
+	longitude := firstFloat64(root,
+		"longitude",
+		"message.longitude",
+		"hfdl.lpdu.hfnpdu.pos.lon",
+	)
+
+	if strings.TrimSpace(flightNumber) == "" && strings.TrimSpace(flightID) == "" &&
+		strings.TrimSpace(departureAirport) == "" && strings.TrimSpace(destinationAirport) == "" &&
+		latitude == 0 && longitude == 0 {
+		return nil
+	}
+
+	return &acars.Flight{
+		ID:                 strings.TrimSpace(flightID),
+		Flight:             airlines.TranslateFlight(strings.TrimSpace(flightNumber)),
+		DepartingAirport:   strings.TrimSpace(departureAirport),
+		DestinationAirport: strings.TrimSpace(destinationAirport),
+		Latitude:           latitude,
+		Longitude:          longitude,
+	}
+}
+
+func normaliseMessageFlight(msg *acars.Message) {
+	if msg == nil || msg.Flight == nil {
+		return
+	}
+
+	msg.Flight = &acars.Flight{
+		ID:                 strings.TrimSpace(msg.Flight.ID),
+		Flight:             airlines.TranslateFlight(strings.TrimSpace(msg.Flight.Flight)),
+		Status:             msg.Flight.Status,
+		DepartingAirport:   strings.TrimSpace(msg.Flight.DepartingAirport),
+		DestinationAirport: strings.TrimSpace(msg.Flight.DestinationAirport),
+		Latitude:           msg.Flight.Latitude,
+		Longitude:          msg.Flight.Longitude,
+		Altitude:           msg.Flight.Altitude,
+	}
 }
 
 func firstString(root map[string]any, paths ...string) string {

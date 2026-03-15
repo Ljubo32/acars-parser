@@ -39,9 +39,11 @@ func (d *Decoder) Decode() (*Message, error) {
 	//  1) Standard UPER SEQUENCE optional field presence bit for the optional element_id_seq (multi-element messages)
 	//  2) Legacy/non-standard encodings where that presence bit is omitted
 	//
-	// To be robust, try both and select the decode that succeeds with the least leftover bits.
-	msgA, remA, errA := d.decodeAttempt(true, false) // standard: presence bit for optional element_id_seq
-	msgB, remB, errB := d.decodeAttempt(false, true) // legacy: no presence bit; optionally try to decode trailing elements heuristically
+	// To be robust, try both encodings, but prefer the standard UPER form whenever it succeeds.
+	// The legacy fallback can accidentally consume a payload cleanly while producing the wrong
+	// header and element IDs, so "fewest leftover bits" is not a safe primary selector.
+	msgA, _, errA := d.decodeAttempt(true, false) // standard: presence bit for optional element_id_seq
+	msgB, _, errB := d.decodeAttempt(false, true) // legacy: no presence bit; optionally try to decode trailing elements heuristically
 
 	// Choose best successful attempt.
 	if errA != nil && errB != nil {
@@ -54,20 +56,7 @@ func (d *Decoder) Decode() (*Message, error) {
 		return msgB, nil
 	}
 
-	// Both succeeded: choose the one that consumes more bits (smaller remainder),
-	// and as a tie-breaker, prefer the one with more elements.
-	if remA < remB {
-		return msgA, nil
-	}
-	if remB < remA {
-		return msgB, nil
-	}
-	if len(msgA.Elements) > len(msgB.Elements) {
-		return msgA, nil
-	}
-	if len(msgB.Elements) > len(msgA.Elements) {
-		return msgB, nil
-	}
+	// Both succeeded: prefer the standard UPER attempt.
 	return msgA, nil
 }
 
@@ -192,9 +181,6 @@ func (d *Decoder) decodeHeader() (*MessageHeader, error) {
 }
 
 // decodeHeaderTimestamp decodes a FANS timestamp as used in CPDLC headers.
-// NOTE: Header timestamps include seconds. We intentionally do NOT expose seconds
-// in JSON (hours/minutes are enough for most UI), but we MUST consume them from
-// the bitstream to keep decoding aligned.
 func (d *Decoder) decodeHeaderTimestamp() (*Time, error) {
 	// Hours (0-23) = 5 bits.
 	hours, err := d.br.ReadConstrainedInt(0, 23)
@@ -206,12 +192,12 @@ func (d *Decoder) decodeHeaderTimestamp() (*Time, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Seconds (0-59) = 6 bits (consume, do not expose).
-	_, err = d.br.ReadConstrainedInt(0, 59)
+	// Seconds (0-59) = 6 bits.
+	seconds, err := d.br.ReadConstrainedInt(0, 59)
 	if err != nil {
 		return nil, err
 	}
-	return &Time{Hours: hours, Minutes: minutes}, nil
+	return &Time{Hours: hours, Minutes: minutes, Seconds: &seconds}, nil
 }
 
 // decodeElement decodes a single message element.
@@ -304,6 +290,14 @@ func (d *Decoder) decodeUplinkData(elemID int) (interface{}, error) {
 		// ICAO unit name + frequency.
 		return d.decodeUnitNameFrequency()
 
+	case 118, 121:
+		// Position + ICAO unit name + frequency.
+		return d.decodePositionUnitNameFrequency()
+
+	case 119, 122:
+		// Time + ICAO unit name + frequency.
+		return d.decodeTimeUnitNameFrequency()
+
 	case 123:
 		// Beacon code.
 		return d.decodeBeaconCode()
@@ -327,6 +321,10 @@ func (d *Decoder) decodeUplinkData(elemID int) (interface{}, error) {
 	case 160:
 		// ICAO facility designation.
 		return d.decodeICAOFacility()
+
+	case 163:
+		// ICAO facility designation + TP4 table.
+		return d.decodeICAOFacilityDesignationTP4Table()
 
 	case 169, 170:
 		// Free text.
@@ -863,12 +861,12 @@ func (d *Decoder) decodePositionReportPosCurrent() (*Position, error) {
 
 // decodeLatLonMin10 decodes lat/lon as (deg, minutes*10) with hemisphere bits.
 // Observed layout (FANS-1/A position reports):
-//  - lat_deg: 0..90
-//  - lat_min10: 0..599 (minutes*10)
-//  - lat_dir: 0=north, 1=south
-//  - lon_dir: 0=west, 1=east
-//  - lon_deg: 0..180
-//  - lon_min10: 0..599 (minutes*10)
+//   - lat_deg: 0..90
+//   - lat_min10: 0..599 (minutes*10)
+//   - lat_dir: 0=north, 1=south
+//   - lon_dir: 0=west, 1=east
+//   - lon_deg: 0..180
+//   - lon_min10: 0..599 (minutes*10)
 func (d *Decoder) decodeLatLonMin10() (float64, float64, error) {
 	latDeg, err := d.br.ReadConstrainedInt(0, 90)
 	if err != nil {
@@ -1247,6 +1245,32 @@ func (d *Decoder) decodeUnitNameFrequency() (map[string]interface{}, error) {
 	}, nil
 }
 
+func (d *Decoder) decodePositionUnitNameFrequency() (map[string]interface{}, error) {
+	position, err := d.decodePosition()
+	if err != nil {
+		return nil, err
+	}
+	data, err := d.decodeUnitNameFrequency()
+	if err != nil {
+		return nil, err
+	}
+	data["position"] = position
+	return data, nil
+}
+
+func (d *Decoder) decodeTimeUnitNameFrequency() (map[string]interface{}, error) {
+	timeValue, err := d.decodeTime()
+	if err != nil {
+		return nil, err
+	}
+	data, err := d.decodeUnitNameFrequency()
+	if err != nil {
+		return nil, err
+	}
+	data["time"] = timeValue
+	return data, nil
+}
+
 // ICAOUnitName represents an ICAO unit name (facility designation + function).
 type ICAOUnitName struct {
 	Designation string
@@ -1254,20 +1278,30 @@ type ICAOUnitName struct {
 }
 
 func (d *Decoder) decodeICAOUnitName() (*ICAOUnitName, error) {
-	// icaoFacilityId choice (observed: 0 => ICAO facility designation).
-	// In practice this is 1 bit in most on-air FANS messages.
+	// ICAOFacilityIdentification is a CHOICE between:
+	//   0: ICAO facility designation (SIZE(4))
+	//   1: ICAO facility name (SIZE(3..18))
 	choice, err := d.br.ReadConstrainedInt(0, 1)
 	if err != nil {
 		return nil, err
 	}
 
-	// ICAO facility designation (4 chars, IA5 7-bit each).
-	// If the choice is not 0, we still try to read 4 chars to stay aligned.
-	des, err := d.decodeIA5String(4)
-	if err != nil {
-		return nil, err
+	name := ""
+	if choice == 0 {
+		name, err = d.decodeIA5String(4)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		length, err := d.br.ReadConstrainedInt(3, 18)
+		if err != nil {
+			return nil, err
+		}
+		name, err = d.decodeIA5String(length)
+		if err != nil {
+			return nil, err
+		}
 	}
-	_ = choice
 
 	// Facility function (ENUM 0..7 => 3 bits).
 	fn, err := d.br.ReadConstrainedInt(0, 7)
@@ -1296,7 +1330,7 @@ func (d *Decoder) decodeICAOUnitName() (*ICAOUnitName, error) {
 		fnStr = ""
 	}
 
-	return &ICAOUnitName{Designation: des, Function: fnStr}, nil
+	return &ICAOUnitName{Designation: name, Function: fnStr}, nil
 }
 
 func (d *Decoder) decodeBeaconCode() (*BeaconCode, error) {
@@ -1384,6 +1418,36 @@ func (d *Decoder) decodeICAOFacility() (string, error) {
 		return "", err
 	}
 	return data, nil
+}
+
+func (d *Decoder) decodeICAOFacilityDesignationTP4Table() (map[string]interface{}, error) {
+	facilityDesignation, err := d.decodeICAOFacility()
+	if err != nil {
+		return nil, err
+	}
+	tp4Table, err := d.decodeTP4Table()
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"facility_designation": facilityDesignation,
+		"tp4_table":            tp4Table,
+	}, nil
+}
+
+func (d *Decoder) decodeTP4Table() (string, error) {
+	value, err := d.br.ReadConstrainedInt(0, 1)
+	if err != nil {
+		return "", err
+	}
+	switch value {
+	case 0:
+		return "labelA", nil
+	case 1:
+		return "labelB", nil
+	default:
+		return "", fmt.Errorf("unsupported TP4 table value %d", value)
+	}
 }
 
 func (d *Decoder) decodeFreeText() (*FreeText, error) {
@@ -1656,6 +1720,12 @@ func (d *Decoder) formatElementText(elem *MessageElement) string {
 
 	// Handle map types for compound data.
 	if data, ok := elem.Data.(map[string]interface{}); ok {
+		if facilityDesignation, ok := data["facility_designation"].(string); ok {
+			text = substituteText(text, "[icaofacilitydesignation]", facilityDesignation)
+		}
+		if tp4Table, ok := data["tp4_table"].(string); ok {
+			text = substituteText(text, "[tp4table]", tp4Table)
+		}
 		if alt, ok := data["altitude"].(*Altitude); ok {
 			text = substituteText(text, "[altitude]", alt.String())
 		}
@@ -1858,13 +1928,16 @@ func (d *Decoder) decodeRouteClearance() (*RouteClearance, error) {
 
 	if hasRouteInfoAdditional {
 		// FANSRouteInformationAdditional is a variable length IA5 string.
+		off := d.br.Offset()
 		length, err := d.br.ReadConstrainedInt(1, 256)
 		if err != nil {
-			return nil, fmt.Errorf("routeInfoAdditional length: %w", err)
+			_ = d.br.SetOffset(off)
+			return rc, nil
 		}
 		text, err := d.decodeIA5String(length)
 		if err != nil {
-			return nil, fmt.Errorf("routeInfoAdditional: %w", err)
+			_ = d.br.SetOffset(off)
+			return rc, nil
 		}
 		rc.RouteInfoAdditional = text
 	}
@@ -1951,9 +2024,9 @@ func (d *Decoder) decodeProcedureName() (*ProcedureName, error) {
 	return proc, nil
 }
 
-// decodeAirwayIdentifier decodes a FANSAirwayIdentifier (SIZE 2..7).
+// decodeAirwayIdentifier decodes a FANSAirwayIdentifier (SIZE 1..5).
 func (d *Decoder) decodeAirwayIdentifier() (string, error) {
-	length, err := d.br.ReadConstrainedInt(2, 7)
+	length, err := d.br.ReadConstrainedInt(1, 5)
 	if err != nil {
 		return "", fmt.Errorf("airway length: %w", err)
 	}
@@ -1963,20 +2036,15 @@ func (d *Decoder) decodeAirwayIdentifier() (string, error) {
 // decodeRouteInformationElement decodes a single route information element.
 // FANSRouteInformationSequence is a CHOICE of various position types.
 func (d *Decoder) decodeRouteInformationElement() (string, error) {
-	// FANSRouteInformationSequence has 11 alternatives (0-10), 4 bits.
+	// FANSRouteInformation has 6 alternatives (0-5), 3 bits.
 	// 0: publicationIdentifier
 	// 1: latitudeLongitude
 	// 2: placeBearingPlaceBearing (2x place-bearing pairs)
 	// 3: placeBearingDistance
 	// 4: airwayIdentifier
 	// 5: trackDetail
-	// 6: airport
-	// 7: rnpRequirements
-	// 8: fix
-	// 9: navaid
-	// 10: holdAtWaypoint
 
-	choice, err := d.br.ReadConstrainedInt(0, 10)
+	choice, err := d.br.ReadConstrainedInt(0, 5)
 	if err != nil {
 		return "", err
 	}
@@ -2006,16 +2074,6 @@ func (d *Decoder) decodeRouteInformationElement() (string, error) {
 		return d.decodeAirwayIdentifier()
 	case 5: // trackDetail (complex, skip for now).
 		return "(track-detail)", nil
-	case 6: // airport.
-		return d.decodeAirport()
-	case 7: // rnpRequirements (skip for now).
-		return "(rnp)", nil
-	case 8: // fix.
-		return d.decodeFixName()
-	case 9: // navaid.
-		return d.decodeNavaid()
-	case 10: // holdAtWaypoint (complex, skip for now).
-		return "(hold)", nil
 	default:
 		return "", fmt.Errorf("unknown route element choice: %d", choice)
 	}

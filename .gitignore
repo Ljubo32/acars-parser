@@ -34,3 +34,14 @@ Thumbs.db
 # Backups
 *_backup/
 *.bak
+
+# Local capture and dump artefacts
+gui/Acars/
+gui/HFDL-*.json
+gui/HFDL-*.txt
+gui/VDL2-*.jsonl
+gui/acars-log-*.json
+gui/acars-log-*.txt
+gui/iataicao.csv
+gui/test_*.jsonl
+gui/Waypoints.txt

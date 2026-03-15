@@ -11,20 +11,37 @@ import (
 	"acars_parser/internal/registry"
 )
 
+// WaypointETA represents a waypoint reference paired with its ETA.
+type WaypointETA struct {
+	Name string `json:"name"`
+	ETA  string `json:"eta,omitempty"`
+}
+
 // Result represents a waypoint position from label 16 messages.
 type Result struct {
-	MsgID       int64   `json:"message_id"`
-	Timestamp   string  `json:"timestamp"`
-	Tail        string  `json:"tail,omitempty"`
-	Time        string  `json:"time,omitempty"`
-	Flight      string  `json:"flight,omitempty"`
-	Waypoint    string  `json:"waypoint,omitempty"`
-	Latitude    float64 `json:"latitude"`
-	Longitude   float64 `json:"longitude"`
-	FlightLevel int     `json:"flight_level,omitempty"`
-	GroundSpeed int     `json:"ground_speed,omitempty"`
-	ETA         string  `json:"eta,omitempty"`
-	Track       int     `json:"track,omitempty"`
+	MsgID              int64         `json:"message_id"`
+	Timestamp          string        `json:"timestamp"`
+	Tail               string        `json:"tail,omitempty"`
+	Time               string        `json:"time,omitempty"`
+	Flight             string        `json:"flight,omitempty"`
+	Reference          string        `json:"reference,omitempty"`
+	Waypoint           string        `json:"waypoint,omitempty"`
+	CurrentWaypoint    string        `json:"current_waypoint,omitempty"`
+	CurrentWaypointETA string        `json:"current_waypoint_eta,omitempty"`
+	NextWaypoint       string        `json:"next_waypoint,omitempty"`
+	NextWaypointETA    string        `json:"next_waypoint_eta,omitempty"`
+	Waypoints          []WaypointETA `json:"waypoints,omitempty"`
+	Latitude           float64       `json:"latitude"`
+	Longitude          float64       `json:"longitude"`
+	FlightLevel        int           `json:"flight_level,omitempty"`
+	GroundSpeed        int           `json:"ground_speed,omitempty"`
+	ETA                string        `json:"eta,omitempty"`
+	Track              int           `json:"track,omitempty"`
+	Temperature        string        `json:"temperature,omitempty"`
+	Wind               string        `json:"wind,omitempty"`
+	WindSpeed          int           `json:"wind_speed,omitempty"`
+	FuelOnBoard        int           `json:"fuel_on_board,omitempty"`
+	Mach               float64       `json:"mach,omitempty"`
 }
 
 func (r *Result) Type() string     { return "waypoint_position" }
@@ -145,6 +162,43 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 			result.Flight = airline + strings.TrimLeft(flightNum, "0")
 		}
 
+	case "posa_position":
+		result.Reference = match.Captures["reference"]
+		result.Waypoint = result.Reference
+		result.CurrentWaypoint = strings.TrimSpace(match.Captures["current_waypoint"])
+		result.CurrentWaypointETA = formatETA(match.Captures["current_eta"])
+		result.NextWaypoint = strings.TrimSpace(match.Captures["next_waypoint"])
+		result.NextWaypointETA = formatETA(match.Captures["next_eta"])
+		result.Waypoints = []WaypointETA{
+			{Name: result.CurrentWaypoint, ETA: result.CurrentWaypointETA},
+			{Name: result.NextWaypoint, ETA: result.NextWaypointETA},
+		}
+		result.ETA = result.NextWaypointETA
+		result.Latitude = parsePOSADecimalCoord(match.Captures["lat"], match.Captures["lat_dir"])
+		result.Longitude = parsePOSADecimalCoord(match.Captures["lon"], match.Captures["lon_dir"])
+		result.Temperature = strings.TrimSpace(match.Captures["temperature"])
+		result.Wind = strings.TrimSpace(match.Captures["wind"])
+
+		if alt, err := strconv.Atoi(match.Captures["altitude"]); err == nil {
+			if alt > 1000 {
+				result.FlightLevel = alt / 100
+			} else {
+				result.FlightLevel = alt
+			}
+		}
+
+		if windSpeed, err := strconv.Atoi(result.Wind); err == nil {
+			result.WindSpeed = windSpeed
+		}
+
+		if fuelOnBoard, err := strconv.Atoi(strings.TrimSpace(match.Captures["fuel_on_board"])); err == nil {
+			result.FuelOnBoard = fuelOnBoard
+		}
+
+		if mach, err := strconv.Atoi(match.Captures["mach"]); err == nil {
+			result.Mach = float64(mach) / 1000.0
+		}
+
 	case "autpos":
 		// AUTPOS has compact lat/lon format: N440853 W0915239 = N44°08'53" W091°52'39"
 		result.Time = match.Captures["time"]
@@ -191,4 +245,43 @@ func parseCompactCoord(coord, dir string) float64 {
 	}
 
 	return result
+}
+
+// parsePOSADecimalCoord parses POSA coordinates encoded as thousandths of a degree without a decimal point.
+func parsePOSADecimalCoord(coord, dir string) float64 {
+	if coord == "" {
+		return 0
+	}
+
+	if strings.Contains(coord, ".") {
+		return patterns.ParseDecimalCoord(coord, dir)
+	}
+
+	value, err := strconv.Atoi(coord)
+	if err != nil {
+		return 0
+	}
+
+	decimal := float64(value) / 1000.0
+	if dir == "S" || dir == "W" {
+		return -decimal
+	}
+
+	return decimal
+}
+
+// formatETA converts HHMMSS values to HH:MM:SS and leaves other formats unchanged.
+func formatETA(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) != 6 {
+		return value
+	}
+
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return value
+		}
+	}
+
+	return value[0:2] + ":" + value[2:4] + ":" + value[4:6]
 }

@@ -4,6 +4,7 @@ package acars
 import (
 	"encoding/json"
 	"strconv"
+	"strings"
 )
 
 // FlexInt64 handles JSON fields that can be either string or number.
@@ -122,6 +123,22 @@ func (w *NATSWrapper) ToMessage() *Message {
 		return nil
 	}
 
+	flight := w.Flight
+	if flight == nil && strings.TrimSpace(w.Message.Flight) != "" {
+		flight = &Flight{Flight: strings.TrimSpace(w.Message.Flight)}
+	} else if flight != nil && flight.Flight == "" && strings.TrimSpace(w.Message.Flight) != "" {
+		flight = &Flight{
+			ID:                 flight.ID,
+			Flight:             strings.TrimSpace(w.Message.Flight),
+			Status:             flight.Status,
+			DepartingAirport:   flight.DepartingAirport,
+			DestinationAirport: flight.DestinationAirport,
+			Latitude:           flight.Latitude,
+			Longitude:          flight.Longitude,
+			Altitude:           flight.Altitude,
+		}
+	}
+
 	msg := &Message{
 		ID:        w.Message.ID,
 		Timestamp: w.Message.Timestamp,
@@ -130,7 +147,7 @@ func (w *NATSWrapper) ToMessage() *Message {
 		Tail:      w.Message.Tail,
 		Frequency: w.Message.Frequency,
 		Airframe:  w.Airframe,
-		Flight:    w.Flight,
+		Flight:    flight,
 		Station:   w.Station,
 	}
 

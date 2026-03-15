@@ -34,13 +34,17 @@ type MessageHeader struct {
 
 // Time represents a FANS timestamp (hours, minutes).
 type Time struct {
-	Hours   int `json:"hours"`
-	Minutes int `json:"minutes"`
+	Hours   int  `json:"hours"`
+	Minutes int  `json:"minutes"`
+	Seconds *int `json:"seconds,omitempty"`
 }
 
 func (t *Time) String() string {
 	if t == nil {
 		return ""
+	}
+	if t.Seconds != nil {
+		return fmt.Sprintf("%02d:%02d:%02d", t.Hours, t.Minutes, *t.Seconds)
 	}
 	return fmt.Sprintf("%02d:%02d", t.Hours, t.Minutes)
 }

@@ -103,6 +103,17 @@ func extractFromResult(update *FlightUpdate, t *Tracker, result registry.Result)
 	if v, ok := m["dest_icao"].(string); ok && v != "" && isValidAirportCode(v) {
 		update.Destination = strings.TrimSpace(v)
 	}
+	if route, ok := m["route"].(string); ok && route != "" {
+		parts := strings.SplitN(strings.TrimSpace(route), "-", 2)
+		if len(parts) == 2 {
+			if update.Origin == "" && isValidAirportCode(parts[0]) {
+				update.Origin = parts[0]
+			}
+			if update.Destination == "" && isValidAirportCode(parts[1]) {
+				update.Destination = parts[1]
+			}
+		}
+	}
 
 	// Extract position.
 	if v, ok := m["latitude"].(float64); ok && v != 0 {
@@ -111,17 +122,25 @@ func extractFromResult(update *FlightUpdate, t *Tracker, result registry.Result)
 	if v, ok := m["longitude"].(float64); ok && v != 0 {
 		update.Longitude = v
 	}
+	if v, ok := m["report_time"].(string); ok && v != "" {
+		update.ReportTime = strings.TrimSpace(v)
+	}
 
 	// Extract altitude (could be int or float64 in JSON).
-	if v, ok := m["altitude"].(float64); ok && v != 0 {
+	if v, ok := m["altitude_ft"].(float64); ok && v != 0 {
 		update.Altitude = int(v)
-	}
-	if v, ok := m["flight_level"].(float64); ok && v != 0 {
+	} else if v, ok := m["altitude"].(float64); ok && v != 0 {
+		update.Altitude = int(v)
+	} else if v, ok := m["flight_level"].(float64); ok && v != 0 {
 		update.Altitude = int(v) * 100 // Convert FL to feet.
 	}
 
 	// Extract ground speed and track.
-	if v, ok := m["ground_speed"].(float64); ok && v != 0 {
+	if v, ok := m["ground_speed_kmh"].(float64); ok && v != 0 {
+		update.GroundSpeed = int(v)
+	} else if v, ok := m["ground_speed_kts"].(float64); ok && v != 0 {
+		update.GroundSpeed = int(v)
+	} else if v, ok := m["ground_speed"].(float64); ok && v != 0 {
 		update.GroundSpeed = int(v)
 	}
 	if v, ok := m["track"].(float64); ok && v != 0 {

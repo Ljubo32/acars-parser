@@ -4,24 +4,24 @@ import "time"
 
 // Aircraft represents an aircraft with ICAO hex to registration mapping.
 type Aircraft struct {
-	ICAOHex      string    `json:"icao_hex"`
-	Registration string    `json:"registration"`
-	TypeCode     string    `json:"type_code,omitempty"`
-	Operator     string    `json:"operator,omitempty"`
-	FirstSeen    time.Time `json:"first_seen"`
-	LastSeen     time.Time `json:"last_seen"`
-	MsgCount     int       `json:"msg_count"`
+	ICAOHex      string     `json:"icao_hex"`
+	Registration string     `json:"registration"`
+	TypeCode     string     `json:"type_code,omitempty"`
+	Operator     string     `json:"operator,omitempty"`
+	FirstSeen    time.Time  `json:"first_seen"`
+	LastSeen     time.Time  `json:"last_seen"`
+	MsgCount     int        `json:"msg_count"`
 	SyncedAt     *time.Time `json:"synced_at,omitempty"`
 }
 
 // Waypoint represents a navigation waypoint with coordinates.
 type Waypoint struct {
-	Name        string    `json:"name"`
-	Latitude    float64   `json:"latitude"`
-	Longitude   float64   `json:"longitude"`
-	SourceCount int       `json:"source_count"`
-	FirstSeen   time.Time `json:"first_seen"`
-	LastSeen    time.Time `json:"last_seen"`
+	Name        string     `json:"name"`
+	Latitude    float64    `json:"latitude"`
+	Longitude   float64    `json:"longitude"`
+	SourceCount int        `json:"source_count"`
+	FirstSeen   time.Time  `json:"first_seen"`
+	LastSeen    time.Time  `json:"last_seen"`
 	SyncedAt    *time.Time `json:"synced_at,omitempty"`
 }
 
@@ -74,6 +74,7 @@ type FlightState struct {
 	FlightNumber string    `json:"flight_number,omitempty"`
 	Origin       string    `json:"origin,omitempty"`
 	Destination  string    `json:"destination,omitempty"`
+	ReportTime   string    `json:"report_time,omitempty"`
 	Latitude     float64   `json:"latitude,omitempty"`
 	Longitude    float64   `json:"longitude,omitempty"`
 	Altitude     int       `json:"altitude,omitempty"`

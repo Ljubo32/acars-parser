@@ -112,6 +112,7 @@ CREATE TABLE IF NOT EXISTS flight_state (
 	flight_number TEXT,
 	origin        TEXT,
 	destination   TEXT,
+	report_time   TEXT,
 	latitude      REAL,
 	longitude     REAL,
 	altitude      INTEGER,

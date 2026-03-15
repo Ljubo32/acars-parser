@@ -65,19 +65,27 @@ func TestParse(t *testing.T) {
 		wantError    bool
 	}{
 		{
-			name:         "Downlink DEVIATING message",
+			name:         "Uplink contact with free text",
 			label:        "AA",
-			text:         "/BOMCAYA.AT1.A4O-SI005080204A",
+			text:         "/BZVCAYA.AT1.5Y-KZGA181529D848336845A55972675391069C1EA38C2A42664F8F3E7208D6AD410C11F",
 			wantType:     "cpdlc",
-			wantDir:      "downlink",
-			wantElements: 1, // dM80 = DEVIATING [distanceoffset][direction] OF ROUTE.
+			wantDir:      "uplink",
+			wantElements: 2,
 		},
 		{
-			name:     "Connect request",
+			name:     "Connect request keeps AA uplink direction",
 			label:    "AA",
 			text:     "/NYCODYA.CR1.N784AVABCD1234",
 			wantType: "connect_request",
-			wantDir:  "downlink",
+			wantDir:  "uplink",
+		},
+		{
+			name:         "Connect request with facility designation and TP4 table",
+			label:        "AA",
+			text:         "/BOMCAYA.CR1.A6-EQF0051D6830A30637A",
+			wantType:     "connect_request",
+			wantDir:      "uplink",
+			wantElements: 1,
 		},
 	}
 
@@ -213,14 +221,13 @@ func TestSplitRegistrationAndData(t *testing.T) {
 }
 
 func TestDecodeElementID(t *testing.T) {
-	// Test that specific hex data decodes to the expected element ID.
-	// Hex: 005080204A should decode to dM80 (DEVIATING).
+	// Test that a known-good AA uplink sample decodes to the expected first element ID.
 	parser := &Parser{}
 
 	msg := &acars.Message{
 		ID:        1,
 		Label:     "AA",
-		Text:      "/BOMCAYA.AT1.A4O-SI005080204A",
+		Text:      "/BZVCAYA.AT1.5Y-KZGA181529D848336845A55972675391069C1EA38C2A42664F8F3E7208D6AD410C11F",
 		Timestamp: "2024-01-01T00:00:00Z",
 	}
 
@@ -239,14 +246,13 @@ func TestDecodeElementID(t *testing.T) {
 	}
 
 	elem := r.Elements[0]
-	// The expected element ID is 80 (dM80 = DEVIATING [distanceoffset][direction] OF ROUTE).
-	if elem.ID != 80 {
-		t.Errorf("Element ID = %d, want 80", elem.ID)
+	if elem.ID != 118 {
+		t.Errorf("Element ID = %d, want 118", elem.ID)
 	}
 
 	// Verify the label matches.
-	if elem.Label != "DEVIATING [distanceoffset] [direction] OF ROUTE" {
-		t.Errorf("Element Label = %q, want 'DEVIATING [distanceoffset] [direction] OF ROUTE'", elem.Label)
+	if elem.Label != "AT [position] CONTACT [icaounitname] [frequency]" {
+		t.Errorf("Element Label = %q, want 'AT [position] CONTACT [icaounitname] [frequency]'", elem.Label)
 	}
 
 	t.Logf("Decoded element: ID=%d, Label=%s, Text=%s", elem.ID, elem.Label, elem.Text)
@@ -329,5 +335,234 @@ func TestDecodePositionReportDM48(t *testing.T) {
 	}
 	if pr.ReportedWptAlt == nil || pr.ReportedWptAlt.Type != "flight_level" || pr.ReportedWptAlt.Value != 330 {
 		t.Fatalf("unexpected reported_wpt_alt: %+v", pr.ReportedWptAlt)
+	}
+}
+
+func TestParseUplinkContactWithFreeText(t *testing.T) {
+	parser := &Parser{}
+
+	msg := &acars.Message{
+		ID:        1,
+		Label:     "AA",
+		Text:      "/BZVCAYA.AT1.5Y-KZGA181529D848336845A55972675391069C1EA38C2A42664F8F3E7208D6AD410C11F",
+		Timestamp: "2026-03-09T00:21:14Z",
+	}
+
+	result := parser.Parse(msg)
+	if result == nil {
+		t.Fatal("Parse() returned nil")
+	}
+
+	r := result.(*Result)
+	if r.Error != "" {
+		t.Fatalf("unexpected parse error: %s", r.Error)
+	}
+	if r.Header == nil || r.Header.Timestamp == nil || r.Header.Timestamp.Seconds == nil {
+		t.Fatalf("missing header timestamp seconds: %+v", r.Header)
+	}
+	if *r.Header.Timestamp.Seconds != 10 {
+		t.Fatalf("unexpected header timestamp: %+v", r.Header.Timestamp)
+	}
+	if len(r.Elements) != 2 {
+		t.Fatalf("expected 2 elements, got %d", len(r.Elements))
+	}
+
+	first := r.Elements[0]
+	if first.ID != 118 {
+		t.Fatalf("expected first element 118, got %d", first.ID)
+	}
+	data, ok := first.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected first element compound data, got %T", first.Data)
+	}
+	position, ok := data["position"].(*Position)
+	if !ok || position == nil || position.Name != "AMPER" {
+		t.Fatalf("unexpected position: %#v", data["position"])
+	}
+	unit, ok := data["unit"].(string)
+	if !ok || unit != "KINSHASA" {
+		t.Fatalf("unexpected unit: %#v", data["unit"])
+	}
+	unitType, ok := data["unit_type"].(string)
+	if !ok || unitType != "control" {
+		t.Fatalf("unexpected unit_type: %#v", data["unit_type"])
+	}
+	freq, ok := data["frequency"].(*Frequency)
+	if !ok || freq == nil || freq.Type != "vhf" || math.Abs(freq.Value-126.100) > 0.0001 {
+		t.Fatalf("unexpected frequency: %#v", data["frequency"])
+	}
+
+	second := r.Elements[1]
+	if second.ID != 169 {
+		t.Fatalf("expected second element 169, got %d", second.ID)
+	}
+	freeText, ok := second.Data.(*FreeText)
+	if !ok || freeText == nil || freeText.Text != "LOGON FZZA" {
+		t.Fatalf("unexpected freetext: %#v", second.Data)
+	}
+	if r.FormattedText != "LOGON FZZA" {
+		t.Fatalf("unexpected formatted text: %q", r.FormattedText)
+	}
+}
+
+func TestParseUplinkSquawkBeaconCode(t *testing.T) {
+	parser := &Parser{}
+
+	msg := &acars.Message{
+		ID:        1,
+		Label:     "AA",
+		Text:      "/JNBCAYA.AT1.ZS-SXD2182505EC420D8B4",
+		Timestamp: "2026-03-09T00:37:04Z",
+	}
+
+	result := parser.Parse(msg)
+	if result == nil {
+		t.Fatal("Parse() returned nil")
+	}
+
+	r := result.(*Result)
+	if r.Error != "" {
+		t.Fatalf("unexpected parse error: %s", r.Error)
+	}
+	if r.Header == nil || r.Header.MsgID != 3 {
+		t.Fatalf("unexpected header: %+v", r.Header)
+	}
+	if r.Header.Timestamp == nil || r.Header.Timestamp.Hours != 0 || r.Header.Timestamp.Minutes != 37 || r.Header.Timestamp.Seconds == nil || *r.Header.Timestamp.Seconds != 1 {
+		t.Fatalf("unexpected header timestamp: %+v", r.Header.Timestamp)
+	}
+	if len(r.Elements) != 1 {
+		t.Fatalf("expected 1 element, got %d", len(r.Elements))
+	}
+
+	first := r.Elements[0]
+	if first.ID != 123 {
+		t.Fatalf("expected first element 123, got %d", first.ID)
+	}
+	if first.Label != "SQUAWK [beaconcode]" {
+		t.Fatalf("unexpected first label: %q", first.Label)
+	}
+	beacon, ok := first.Data.(*BeaconCode)
+	if !ok || beacon == nil || beacon.Code != "0410" {
+		t.Fatalf("unexpected beacon data: %#v", first.Data)
+	}
+	if first.Text != "SQUAWK 0410" {
+		t.Fatalf("unexpected first text: %q", first.Text)
+	}
+	if r.FormattedText != "SQUAWK 0410" {
+		t.Fatalf("unexpected formatted text: %q", r.FormattedText)
+	}
+}
+
+func TestParseConnectRequestFacilityDesignationTP4Table(t *testing.T) {
+	parser := &Parser{}
+
+	msg := &acars.Message{
+		ID:        1,
+		Label:     "AA",
+		Text:      "/BOMCAYA.CR1.A6-EQF0051D6830A30637A",
+		Timestamp: "2026-03-09T00:47:04Z",
+	}
+
+	result := parser.Parse(msg)
+	if result == nil {
+		t.Fatal("Parse() returned nil")
+	}
+
+	r := result.(*Result)
+	if r.Error != "" {
+		t.Fatalf("unexpected parse error: %s", r.Error)
+	}
+	if r.MessageType != "connect_request" {
+		t.Fatalf("unexpected message type: %q", r.MessageType)
+	}
+	if r.Header == nil || r.Header.MsgID != 0 {
+		t.Fatalf("unexpected header: %+v", r.Header)
+	}
+	if len(r.Elements) != 1 {
+		t.Fatalf("expected 1 element, got %d", len(r.Elements))
+	}
+	first := r.Elements[0]
+	if first.ID != 163 {
+		t.Fatalf("expected first element 163, got %d", first.ID)
+	}
+	if first.Label != "[icaofacilitydesignation] [tp4table]" {
+		t.Fatalf("unexpected first label: %q", first.Label)
+	}
+	data, ok := first.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map data, got %T", first.Data)
+	}
+	facilityDesignation, ok := data["facility_designation"].(string)
+	if !ok || facilityDesignation != "VABF" {
+		t.Fatalf("unexpected facility designation: %#v", data["facility_designation"])
+	}
+	tp4Table, ok := data["tp4_table"].(string)
+	if !ok || tp4Table != "labelA" {
+		t.Fatalf("unexpected TP4 table: %#v", data["tp4_table"])
+	}
+	if first.Text != "VABF labelA" {
+		t.Fatalf("unexpected first text: %q", first.Text)
+	}
+	if r.FormattedText != "VABF labelA" {
+		t.Fatalf("unexpected formatted text: %q", r.FormattedText)
+	}
+}
+
+func TestParseUplinkMaintainAndClearedViaRoute(t *testing.T) {
+	parser := &Parser{}
+
+	msg := &acars.Message{
+		ID:        1,
+		Label:     "AA",
+		Text:      "/BZVCAYA.AT1.5Y-KZEA0C45784F2D02789066D08B4803012558EE1B32000DEB0",
+		Timestamp: "2026-03-09T17:05:34Z",
+	}
+
+	result := parser.Parse(msg)
+	if result == nil {
+		t.Fatal("Parse() returned nil")
+	}
+
+	r := result.(*Result)
+	if r.Error != "" {
+		t.Fatalf("unexpected parse error: %s", r.Error)
+	}
+	if r.Header == nil || r.Header.MsgID != 1 {
+		t.Fatalf("unexpected header: %+v", r.Header)
+	}
+	if r.Header.Timestamp == nil || r.Header.Timestamp.Hours != 17 || r.Header.Timestamp.Minutes != 5 || r.Header.Timestamp.Seconds == nil || *r.Header.Timestamp.Seconds != 30 {
+		t.Fatalf("unexpected header timestamp: %+v", r.Header.Timestamp)
+	}
+	if len(r.Elements) != 2 {
+		t.Fatalf("expected 2 elements, got %d", len(r.Elements))
+	}
+
+	first := r.Elements[0]
+	if first.ID != 19 {
+		t.Fatalf("expected first element 19, got %d", first.ID)
+	}
+	altitude, ok := first.Data.(*Altitude)
+	if !ok || altitude == nil || altitude.Type != "flight_level" || altitude.Value != 390 {
+		t.Fatalf("unexpected altitude: %#v", first.Data)
+	}
+
+	second := r.Elements[1]
+	if second.ID != 79 {
+		t.Fatalf("expected second element 79, got %d", second.ID)
+	}
+	data, ok := second.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected second element map data, got %T", second.Data)
+	}
+	position, ok := data["position"].(*Position)
+	if !ok || position == nil || position.Name != "AMPER" {
+		t.Fatalf("unexpected position: %#v", data["position"])
+	}
+	routeClearance, ok := data["route_clearance"].(*RouteClearance)
+	if !ok || routeClearance == nil {
+		t.Fatalf("unexpected route clearance: %#v", data["route_clearance"])
+	}
+	if len(routeClearance.RouteInformation) != 1 || routeClearance.RouteInformation[0] != "UG862" {
+		t.Fatalf("unexpected route information: %#v", routeClearance.RouteInformation)
 	}
 }

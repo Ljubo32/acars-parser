@@ -112,13 +112,11 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 		result.Direction = "downlink"
 	}
 
-	// For connection messages, we don't have CPDLC payload to decode.
-	if result.MessageType != "cpdlc" {
-		return result
-	}
-
 	// Decode the hex payload.
 	if hexData == "" {
+		if result.MessageType != "cpdlc" {
+			return result
+		}
 		result.Error = "no payload data"
 		return result
 	}
