@@ -266,9 +266,17 @@ func (d *Decoder) decodeUplinkData(elemID int) (interface{}, error) {
 		// Time + Altitude.
 		return d.decodeTimeAltitude()
 
+	case 26, 28:
+		// Altitude + Time.
+		return d.decodeAltitudeTime()
+
 	case 14, 16, 18, 22, 25, 42, 43, 44, 45, 46, 47, 48, 49, 92:
 		// Position + Altitude.
 		return d.decodePositionAltitude()
+
+	case 27, 29:
+		// Altitude + Position.
+		return d.decodeAltitudePosition()
 
 	case 30, 31, 32, 180:
 		// Altitude + Altitude.
@@ -621,7 +629,19 @@ func (d *Decoder) decodeTimeAltitude() (map[string]interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]interface{}{"time": time, "altitude": alt}, nil
+	return withPrimaryAltitudeFields(map[string]interface{}{"time": time, "altitude": alt}, alt), nil
+}
+
+func (d *Decoder) decodeAltitudeTime() (map[string]interface{}, error) {
+	alt, err := d.decodeAltitude()
+	if err != nil {
+		return nil, err
+	}
+	time, err := d.decodeTime()
+	if err != nil {
+		return nil, err
+	}
+	return withPrimaryAltitudeFields(map[string]interface{}{"altitude": alt, "time": time}, alt), nil
 }
 
 func (d *Decoder) decodePositionAltitude() (map[string]interface{}, error) {
@@ -633,7 +653,28 @@ func (d *Decoder) decodePositionAltitude() (map[string]interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]interface{}{"position": pos, "altitude": alt}, nil
+	return withPrimaryAltitudeFields(map[string]interface{}{"position": pos, "altitude": alt}, alt), nil
+}
+
+func (d *Decoder) decodeAltitudePosition() (map[string]interface{}, error) {
+	alt, err := d.decodeAltitude()
+	if err != nil {
+		return nil, err
+	}
+	pos, err := d.decodePosition()
+	if err != nil {
+		return nil, err
+	}
+	return withPrimaryAltitudeFields(map[string]interface{}{"altitude": alt, "position": pos}, alt), nil
+}
+
+func withPrimaryAltitudeFields(data map[string]interface{}, alt *Altitude) map[string]interface{} {
+	if data == nil || alt == nil {
+		return data
+	}
+	data["type"] = alt.Type
+	data["value"] = alt.Value
+	return data
 }
 
 func (d *Decoder) decodePositionRouteClearance() (map[string]interface{}, error) {
