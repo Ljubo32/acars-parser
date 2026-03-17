@@ -15,6 +15,13 @@ type Result interface {
 	MessageID() int64 // The original message ID
 }
 
+// HumanReadableResult is implemented by results that can provide a
+// human-readable text rendering suitable for CLI text output.
+type HumanReadableResult interface {
+	Result
+	HumanReadableText() string
+}
+
 // Parser is implemented by each message parser.
 type Parser interface {
 	// Name returns the parser's unique identifier.

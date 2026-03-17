@@ -33,6 +33,9 @@ type Result struct {
 
 func (r *Result) Type() string     { return "cpdlc" }
 func (r *Result) MessageID() int64 { return r.MsgID }
+func (r *Result) HumanReadableText() string {
+	return strings.TrimSpace(r.FormattedText)
+}
 
 // Parser parses CPDLC messages (Labels AA, BA).
 type Parser struct{}

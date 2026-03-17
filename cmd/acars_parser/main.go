@@ -76,10 +76,10 @@ type Stats struct {
 
 func usage(w io.Writer) {
 	fmt.Fprintln(w, "acars_parser (extract) - commands:")
-	fmt.Fprintln(w, "  extract  - parse JSONL or JAERO TXT file and output JSON")
+	fmt.Fprintln(w, "  extract  - parse JSONL or JAERO TXT file and output JSON or text")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  acars_parser extract -input messages.jsonl [-output out.json] [-pretty] [-all] [-stats]")
+	fmt.Fprintln(w, "  acars_parser extract -input messages.jsonl [-output out.json] [-pretty] [-all] [-stats] [-format json|text]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Notes:")
 	fmt.Fprintln(w, "  - Input may be JSONL (one JSON object per line) or a JAERO TXT log.")
@@ -110,9 +110,15 @@ func runExtract(args []string) {
 	inPath := fs.String("input", "", "Input JSONL file (default: stdin)")
 	outPath := fs.String("output", "", "Output JSON file (default: stdout)")
 	pretty := fs.Bool("pretty", false, "Pretty-print JSON output")
+	outputFormat := fs.String("format", "json", "Output format: json or text")
 	includeAll := fs.Bool("all", false, "Include messages even if no parser matched")
 	showStats := fs.Bool("stats", false, "Print basic counters to stderr")
 	_ = fs.Parse(args)
+
+	if *outputFormat != "json" && *outputFormat != "text" {
+		fmt.Fprintf(os.Stderr, "Unsupported output format: %s\n", *outputFormat)
+		os.Exit(2)
+	}
 
 	// Ensure parsers priority ordering is stable.
 	registry.Default().Sort()
@@ -169,14 +175,21 @@ func runExtract(args []string) {
 		wout = f
 	}
 
-	enc, err := marshalJSON(out, *pretty)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "JSON encode error: %v\n", err)
-		os.Exit(1)
-	}
-	_, _ = wout.Write(enc)
-	if wout == os.Stdout {
-		_, _ = wout.Write([]byte("\n"))
+	if *outputFormat == "text" {
+		_, _ = io.WriteString(wout, formatExtractText(out))
+		if wout == os.Stdout {
+			_, _ = wout.Write([]byte("\n"))
+		}
+	} else {
+		enc, err := marshalJSON(out, *pretty)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "JSON encode error: %v\n", err)
+			os.Exit(1)
+		}
+		_, _ = wout.Write(enc)
+		if wout == os.Stdout {
+			_, _ = wout.Write([]byte("\n"))
+		}
 	}
 
 	if *showStats {
@@ -719,6 +732,75 @@ func marshalJSON(v any, pretty bool) ([]byte, error) {
 		return json.MarshalIndent(v, "", "  ")
 	}
 	return json.Marshal(v)
+}
+
+func formatExtractText(out []ExtractOut) string {
+	if len(out) == 0 {
+		return ""
+	}
+
+	blocks := make([]string, 0, len(out))
+	for _, item := range out {
+		block := formatExtractTextBlock(item)
+		if strings.TrimSpace(block) == "" {
+			continue
+		}
+		blocks = append(blocks, block)
+	}
+
+	return strings.Join(blocks, "\n\n")
+}
+
+func formatExtractTextBlock(out ExtractOut) string {
+	rawText := strings.TrimRightFunc(strings.TrimSpace(extractRawText(out)), func(r rune) bool {
+		return r == '\r' || r == '\n'
+	})
+	formattedResults := collectHumanReadableResults(out.Results)
+
+	switch {
+	case rawText != "" && len(formattedResults) > 0:
+		return rawText + "\n" + strings.Join(formattedResults, "\n")
+	case rawText != "":
+		return rawText
+	case len(formattedResults) > 0:
+		return strings.Join(formattedResults, "\n")
+	default:
+		return ""
+	}
+}
+
+func extractRawText(out ExtractOut) string {
+	if out.Message == nil {
+		return ""
+	}
+	return strings.TrimRight(out.Message.Text, "\r\n")
+}
+
+func collectHumanReadableResults(results []any) []string {
+	if len(results) == 0 {
+		return nil
+	}
+
+	formatted := make([]string, 0, len(results))
+	seen := make(map[string]struct{}, len(results))
+	for _, result := range results {
+		humanReadable, ok := result.(registry.HumanReadableResult)
+		if !ok {
+			continue
+		}
+		text := strings.TrimRight(humanReadable.HumanReadableText(), "\r\n")
+		normalised := strings.TrimSpace(text)
+		if normalised == "" {
+			continue
+		}
+		if _, exists := seen[normalised]; exists {
+			continue
+		}
+		seen[normalised] = struct{}{}
+		formatted = append(formatted, text)
+	}
+
+	return formatted
 }
 
 func decodeToMessage(b []byte) ([]*acars.Message, string) {

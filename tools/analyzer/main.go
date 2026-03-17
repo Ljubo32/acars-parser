@@ -27,6 +27,11 @@ func main() {
 
 	flag.Parse()
 
+	if *outputFormat != "text" && *outputFormat != "json" {
+		fmt.Fprintf(os.Stderr, "Error: unsupported -format %q (expected text or json)\n", *outputFormat)
+		os.Exit(1)
+	}
+
 	db, err := sql.Open("sqlite3", *dbPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
@@ -43,7 +48,11 @@ func main() {
 		matches, total, matchIDs, nonMatchIDs := TestPattern(db, *testPattern, *label)
 		fmt.Printf("Pattern: %s\n", *testPattern)
 		fmt.Printf("Label: %s\n", *label)
-		fmt.Printf("Result: %d/%d match (%.1f%%)\n\n", matches, total, float64(matches)/float64(total)*100)
+		matchPct := 0.0
+		if total > 0 {
+			matchPct = float64(matches) / float64(total) * 100
+		}
+		fmt.Printf("Result: %d/%d match (%.1f%%)\n\n", matches, total, matchPct)
 
 		if len(matchIDs) > 0 {
 			fmt.Printf("Sample matches: %v\n", matchIDs)
@@ -105,51 +114,51 @@ func main() {
 		data, _ := json.MarshalIndent(report, "", "  ")
 		fmt.Println(string(data))
 	} else {
-		printTextReport(report, *topN)
+		printTextReport(report)
 	}
 }
 
 // AnalysisReport contains all analysis results.
 type AnalysisReport struct {
-	Summary          SummaryStats            `json:"summary"`
+	Summary           SummaryStats           `json:"summary"`
 	LabelDistribution []LabelCount           `json:"label_distribution"`
-	ParserCoverage   []ParserCount           `json:"parser_coverage"`
-	LabelParsing     []LabelParseStats       `json:"label_parsing"`
-	ContentPatterns  []LabelContentPatterns  `json:"content_patterns"`
-	FieldCoverage    []FieldCoverageStats    `json:"field_coverage"`
-	TemplateAnalysis []LabelTemplates        `json:"template_analysis,omitempty"`
+	ParserCoverage    []ParserCount          `json:"parser_coverage"`
+	LabelParsing      []LabelParseStats      `json:"label_parsing"`
+	ContentPatterns   []LabelContentPatterns `json:"content_patterns"`
+	FieldCoverage     []FieldCoverageStats   `json:"field_coverage"`
+	TemplateAnalysis  []LabelTemplates       `json:"template_analysis,omitempty"`
 }
 
 type SummaryStats struct {
-	TotalMessages   int     `json:"total_messages"`
-	ParsedMessages  int     `json:"parsed_messages"`
-	UnparsedMessages int    `json:"unparsed_messages"`
-	ParseRate       float64 `json:"parse_rate"`
-	UniqueLabels    int     `json:"unique_labels"`
-	UniqueParserTypes int   `json:"unique_parser_types"`
-	GoldenMessages  int     `json:"golden_messages"`
-	FlaggedMessages int     `json:"flagged_messages"`
+	TotalMessages     int     `json:"total_messages"`
+	ParsedMessages    int     `json:"parsed_messages"`
+	UnparsedMessages  int     `json:"unparsed_messages"`
+	ParseRate         float64 `json:"parse_rate"`
+	UniqueLabels      int     `json:"unique_labels"`
+	UniqueParserTypes int     `json:"unique_parser_types"`
+	GoldenMessages    int     `json:"golden_messages"`
+	FlaggedMessages   int     `json:"flagged_messages"`
 }
 
 type LabelCount struct {
-	Label string `json:"label"`
-	Count int    `json:"count"`
+	Label string  `json:"label"`
+	Count int     `json:"count"`
 	Pct   float64 `json:"percentage"`
 }
 
 type ParserCount struct {
-	ParserType string `json:"parser_type"`
-	Count      int    `json:"count"`
+	ParserType string  `json:"parser_type"`
+	Count      int     `json:"count"`
 	Pct        float64 `json:"percentage"`
 }
 
 type LabelParseStats struct {
-	Label        string  `json:"label"`
-	Total        int     `json:"total"`
-	Parsed       int     `json:"parsed"`
-	Unparsed     int     `json:"unparsed"`
-	ParseRate    float64 `json:"parse_rate"`
-	TopParsers   []string `json:"top_parsers"`
+	Label      string   `json:"label"`
+	Total      int      `json:"total"`
+	Parsed     int      `json:"parsed"`
+	Unparsed   int      `json:"unparsed"`
+	ParseRate  float64  `json:"parse_rate"`
+	TopParsers []string `json:"top_parsers"`
 }
 
 type LabelContentPatterns struct {
@@ -159,14 +168,14 @@ type LabelContentPatterns struct {
 }
 
 type KeywordCount struct {
-	Keyword string `json:"keyword"`
-	Count   int    `json:"count"`
+	Keyword string  `json:"keyword"`
+	Count   int     `json:"count"`
 	Pct     float64 `json:"percentage"`
 }
 
 type FieldCoverageStats struct {
-	ParserType string             `json:"parser_type"`
-	Fields     []FieldCount       `json:"fields"`
+	ParserType string       `json:"parser_type"`
+	Fields     []FieldCount `json:"fields"`
 }
 
 type FieldCount struct {
@@ -342,12 +351,14 @@ var interestingKeywords = []string{
 func analyzeContentPatterns(db *sql.DB, filterLabel string, topN int) []LabelContentPatterns {
 	// Get labels to analyze.
 	query := "SELECT DISTINCT label FROM messages"
+	args := make([]any, 0, 1)
 	if filterLabel != "" {
-		query += " WHERE label = '" + filterLabel + "'"
+		query += " WHERE label = ?"
+		args = append(args, filterLabel)
 	}
 	query += " ORDER BY label"
 
-	labelRows, err := db.Query(query)
+	labelRows, err := db.Query(query, args...)
 	if err != nil {
 		return nil
 	}
@@ -550,6 +561,8 @@ var tokenPatterns = []struct {
 	{"<ALNUM>", regexp.MustCompile(`^[A-Z0-9]{6,}$`)},
 }
 
+var alphaTokenPattern = regexp.MustCompile(`^[A-Z]{3,8}$`)
+
 var literalKeywords = map[string]bool{
 	"PDC": true, "CLRD": true, "CLEARED": true, "TO": true, "VIA": true,
 	"OFF": true, "RWY": true, "RUNWAY": true, "SID": true, "DEP": true,
@@ -563,11 +576,13 @@ var literalKeywords = map[string]bool{
 func analyzeTemplates(db *sql.DB, filterLabel string, topN int) []LabelTemplates {
 	// Get labels to analyze.
 	query := `SELECT label, COUNT(*) as cnt FROM messages GROUP BY label HAVING cnt >= 10 ORDER BY cnt DESC LIMIT 20`
+	args := make([]any, 0, 1)
 	if filterLabel != "" {
-		query = `SELECT label, COUNT(*) as cnt FROM messages WHERE label = '` + filterLabel + `' GROUP BY label`
+		query = `SELECT label, COUNT(*) as cnt FROM messages WHERE label = ? GROUP BY label`
+		args = append(args, filterLabel)
 	}
 
-	labelRows, err := db.Query(query)
+	labelRows, err := db.Query(query, args...)
 	if err != nil {
 		return nil
 	}
@@ -605,16 +620,6 @@ func analyzeTemplates(db *sql.DB, filterLabel string, topN int) []LabelTemplates
 		}
 		rows.Close()
 
-		// Count templates.
-		type tmplCount struct {
-			tmpl    string
-			count   int
-			example string
-		}
-		var counts []tmplCount
-		for tmpl, examples := range templates {
-			counts = append(counts, tmplCount{tmpl, len(examples), examples[0]})
-		}
 		// Recount properly.
 		templateCounts := make(map[string]int)
 		templateExamples := make(map[string]string)
@@ -700,7 +705,7 @@ func classifyToken(tok string) string {
 		return tok
 	}
 
-	if regexp.MustCompile(`^[A-Z]{3,8}$`).MatchString(tok) {
+	if alphaTokenPattern.MatchString(tok) {
 		return tok
 	}
 
@@ -716,7 +721,7 @@ func truncate(s string, max int) string {
 	return s
 }
 
-func printTextReport(report *AnalysisReport, topN int) {
+func printTextReport(report *AnalysisReport) {
 	fmt.Println("═══════════════════════════════════════════════════════════════")
 	fmt.Println("                    ACARS CORPUS ANALYSIS")
 	fmt.Println("═══════════════════════════════════════════════════════════════")

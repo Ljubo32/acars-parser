@@ -4,6 +4,7 @@
 package mediaadv
 
 import (
+	"fmt"
 	"strings"
 
 	"acars_parser/internal/acars"
@@ -20,16 +21,21 @@ type LinkType struct {
 type Result struct {
 	MsgID          int64      `json:"message_id"`
 	Timestamp      string     `json:"timestamp"`
+	MessageType    string     `json:"message_type"`
 	Version        int        `json:"version"`
 	CurrentLink    LinkType   `json:"current_link"`
 	Established    bool       `json:"established"` // true = link established, false = link lost
 	LinkTime       string     `json:"link_time"`   // HH:MM:SS
 	AvailableLinks []LinkType `json:"available_links"`
+	FormattedText  string     `json:"formatted_text,omitempty"`
 	Text           string     `json:"text,omitempty"`
 }
 
 func (r *Result) Type() string     { return "media_advisory" }
 func (r *Result) MessageID() int64 { return r.MsgID }
+func (r *Result) HumanReadableText() string {
+	return strings.TrimRight(r.FormattedText, "\r\n")
+}
 
 // linkDescriptions maps link codes to their descriptions.
 var linkDescriptions = map[byte]string{
@@ -137,6 +143,7 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 	result := &Result{
 		MsgID:       int64(msg.ID),
 		Timestamp:   msg.Timestamp,
+		MessageType: "media_advisory",
 		Version:     version,
 		CurrentLink: getLinkType(currentLink),
 		Established: state == 'E',
@@ -160,6 +167,8 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 		result.Text = text[1:]
 	}
 
+	result.FormattedText = formatResult(result)
+
 	return result
 }
 
@@ -169,4 +178,54 @@ func formatTime(h, m, s byte) string {
 		'0' + m/10, '0' + m%10, ':',
 		'0' + s/10, '0' + s%10,
 	})
+}
+
+func formatResult(result *Result) string {
+	if result == nil {
+		return ""
+	}
+
+	lines := []string{
+		fmt.Sprintf(" Media Advisory, version %d:", result.Version),
+		fmt.Sprintf("  Link %s %s at %s UTC", result.CurrentLink.Description, linkStateText(result.Established), result.LinkTime),
+	}
+
+	availableLinks := formatAvailableLinks(result.AvailableLinks)
+	if availableLinks == "" {
+		availableLinks = "none"
+	}
+	lines = append(lines, fmt.Sprintf("  Available links: %s", availableLinks))
+
+	if strings.TrimSpace(result.Text) != "" {
+		lines = append(lines, fmt.Sprintf("  Text: %s", strings.TrimSpace(result.Text)))
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func linkStateText(established bool) string {
+	if established {
+		return "established"
+	}
+	return "lost"
+}
+
+func formatAvailableLinks(links []LinkType) string {
+	if len(links) == 0 {
+		return ""
+	}
+
+	descriptions := make([]string, 0, len(links))
+	for _, link := range links {
+		description := strings.TrimSpace(link.Description)
+		if description == "" {
+			description = strings.TrimSpace(link.Code)
+		}
+		if description == "" {
+			continue
+		}
+		descriptions = append(descriptions, description)
+	}
+
+	return strings.Join(descriptions, ", ")
 }

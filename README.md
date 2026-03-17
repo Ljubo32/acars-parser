@@ -60,7 +60,7 @@ When the viewer is served over HTTP from the `gui/` directory, it will try to lo
 Extracts structured data from JSONL files and JAERO TXT logs containing ACARS messages.
 
 ```bash
-./acars_parser extract -input messages.jsonl [-output output.json] [-pretty] [-all]
+./acars_parser extract -input messages.jsonl [-output output.json] [-pretty] [-all] [-format json|text]
 ```
 
 The `extract` command autodetects JSONL and JAERO TXT input. For JAERO logs, the CLI converts each timestamped block into a normal ACARS message, keeps only the raw ACARS payload in `message.text`, preserves legitimate multiline payload text, strips JAERO line-wrap artefacts such as inserted `- #MD` continuations, and skips empty blocks.
@@ -88,6 +88,7 @@ When the input contains `message.flight` with a leading two-character IATA airli
 **Options:**
 - `-input FILE` - Input JSONL file (default: stdin)
 - `-output FILE` - Output JSON file (default: stdout)
+- `-format FORMAT` - Output format: `json` (default) or `text`
 - `-pretty` - Pretty print JSON output
 - `-all` - Include all parsed data types
 
@@ -397,7 +398,17 @@ Parses data link status messages reporting which communication links (VHF, SATCO
 ```
 0EV095905V
 ```
-Extracts: link status (established/lost), current link type, timestamp, available links.
+Extracts: link status (established/lost), current link type, timestamp, available links, and a human-readable `formatted_text` rendering.
+
+Example decoded text:
+```
+0EH103440VSH/
+ Media Advisory, version 0:
+  Link HF established at 10:34:40 UTC
+  Available links: VHF ACARS, Default SATCOM, HF
+```
+
+In `extract -format text`, SA payloads are rendered in this human-readable form after the raw ACARS payload. The HTML viewer raw-text pane also expands SA messages in the same style.
 
 ### CPDLC - Controller-Pilot Data Link Communications (AA)
 Parses FANS-1/A CPDLC messages using pure Go ASN.1 PER decoding (no libacars dependency). Supports:
@@ -441,7 +452,9 @@ Example decoded output:
 
 ## Output Format
 
-All extract commands output JSON with a `stats` object summarising the parsing results:
+The `extract` command outputs JSON by default. When `-format text` is selected, it prints the raw ACARS payload followed by any available human-readable parser rendering, such as the expanded SA Media Advisory text.
+
+JSON output example:
 
 ```json
 {

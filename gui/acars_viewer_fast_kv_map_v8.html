@@ -948,6 +948,7 @@ function makeDetailsCell(rowIndex){
    const displayRawText = getDisplayRawText(r, messageLabel, rawText);
    const showRawText = displayRawText && (
      messageLabel === 'AA' ||
+     messageLabel === 'SA' ||
      messageLabel === 'A6' ||
      messageLabel === 'B6' ||
      /[\r\n]/.test(String(displayRawText))
@@ -1001,9 +1002,15 @@ function makeDetailsCell(rowIndex){
 
 function getDisplayRawText(row, messageLabel, rawText){
   const raw = String(rawText || '').trimEnd();
-  if (messageLabel !== 'AA' && messageLabel !== 'A6' && messageLabel !== 'B6') return raw;
+  if (messageLabel !== 'AA' && messageLabel !== 'SA' && messageLabel !== 'A6' && messageLabel !== 'B6') return raw;
 
   const results = Array.isArray(row?.raw?.results) ? row.raw.results : [];
+
+  if (messageLabel === 'SA') {
+    const mediaadv = results.find((it) => it && it.message_type === 'media_advisory');
+    const expandedMediaAdv = formatMediaAdvRawText(raw, mediaadv);
+    if (expandedMediaAdv) return expandedMediaAdv;
+  }
 
   const cpdlc = results.find((it) => it && (
     it.message_type === 'cpdlc' ||
@@ -1031,6 +1038,48 @@ function getDisplayRawText(row, messageLabel, rawText){
   if (expandedADSC) return expandedADSC;
 
   return expanded || raw;
+}
+
+function formatMediaAdvRawText(rawText, mediaadv){
+  const raw = String(rawText || '').trimEnd();
+  if (!mediaadv || typeof mediaadv !== 'object') return raw;
+
+  const formatted = getMediaAdvFormattedText(mediaadv);
+  if (!formatted) return raw;
+  if (!raw) return formatted;
+
+  return `${raw}\n${formatted}`.trim();
+}
+
+function getMediaAdvFormattedText(mediaadv){
+  const direct = String(mediaadv?.formatted_text || '').trim();
+  if (direct) return direct;
+
+  const version = Number.isFinite(Number(mediaadv?.version)) ? Number(mediaadv.version) : 0;
+  const currentDescription = String(mediaadv?.current_link?.description || mediaadv?.current_link?.code || '').trim();
+  const linkTime = String(mediaadv?.link_time || '').trim();
+  const state = mediaadv?.established ? 'established' : 'lost';
+  const availableLinks = Array.isArray(mediaadv?.available_links)
+    ? mediaadv.available_links
+        .map((link) => String(link?.description || link?.code || '').trim())
+        .filter(Boolean)
+        .join(', ')
+    : '';
+
+  if (!currentDescription || !linkTime) return '';
+
+  const lines = [
+    `Media Advisory, version ${version}:`,
+    `  Link ${currentDescription} ${state} at ${linkTime} UTC`,
+    `  Available links: ${availableLinks || 'none'}`
+  ];
+
+  const extraText = String(mediaadv?.text || '').trim();
+  if (extraText) {
+    lines.push(`  Text: ${extraText}`);
+  }
+
+  return lines.join('\n');
 }
 
 function formatCPDLCRawText(rawText, cpdlc){

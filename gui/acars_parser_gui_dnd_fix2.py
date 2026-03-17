@@ -63,6 +63,7 @@ class App(BaseTk):
 
         self.exe_var = tk.StringVar(value=r".\acars_parser.exe")
         self.outdir_var = tk.StringVar(value="")  # empty => same folder as input
+        self.format_var = tk.StringVar(value="json")
         self.pretty_var = tk.BooleanVar(value=True)
         self.all_var = tk.BooleanVar(value=True)
         self.stats_var = tk.BooleanVar(value=False)
@@ -78,28 +79,39 @@ class App(BaseTk):
         frm = ttk.Frame(self, padding=10)
         frm.pack(fill="both", expand=True)
 
-        row0 = ttk.Frame(frm); row0.pack(fill="x", pady=(0, 6))
+        row0 = ttk.Frame(frm)
+        row0.pack(fill="x", pady=(0, 6))
         ttk.Label(row0, text="acars_parser executable:").pack(side="left")
         ttk.Entry(row0, textvariable=self.exe_var, width=80).pack(side="left", padx=6, fill="x", expand=True)
         ttk.Button(row0, text="Browse…", command=self.pick_exe).pack(side="left")
 
-        row1 = ttk.Frame(frm); row1.pack(fill="x", pady=6)
+        row1 = ttk.Frame(frm)
+        row1.pack(fill="x", pady=6)
         ttk.Label(row1, text="Output folder (optional):").pack(side="left")
         ttk.Entry(row1, textvariable=self.outdir_var, width=80).pack(side="left", padx=6, fill="x", expand=True)
         ttk.Button(row1, text="Browse…", command=self.pick_outdir).pack(side="left")
 
-        row2 = ttk.Frame(frm); row2.pack(fill="x", pady=6)
-        ttk.Checkbutton(row2, text="Pretty (-pretty)", variable=self.pretty_var).pack(side="left")
-        ttk.Checkbutton(row2, text="All (-all)", variable=self.all_var).pack(side="left", padx=(10, 0))
-        ttk.Checkbutton(row2, text="Stats (-stats) if supported", variable=self.stats_var).pack(side="left", padx=(10, 0))
-        ttk.Button(row2, text="Add files…", command=self.add_files).pack(side="right")
-        ttk.Button(row2, text="Run Extract (queue)", command=self.run_queue).pack(side="right", padx=(0, 8))
+        row2 = ttk.Frame(frm)
+        row2.pack(fill="x", pady=6)
+        ttk.Label(row2, text="Output format:").pack(side="left")
+        ttk.Radiobutton(row2, text="JSON", value="json", variable=self.format_var, command=self._sync_format_options).pack(side="left", padx=(6, 0))
+        ttk.Radiobutton(row2, text="Text", value="text", variable=self.format_var, command=self._sync_format_options).pack(side="left", padx=(6, 0))
+
+        row3 = ttk.Frame(frm)
+        row3.pack(fill="x", pady=6)
+        self.pretty_check = ttk.Checkbutton(row3, text="Pretty (-pretty)", variable=self.pretty_var)
+        self.pretty_check.pack(side="left")
+        ttk.Checkbutton(row3, text="All (-all)", variable=self.all_var).pack(side="left", padx=(10, 0))
+        ttk.Checkbutton(row3, text="Stats (-stats) if supported", variable=self.stats_var).pack(side="left", padx=(10, 0))
+        ttk.Button(row3, text="Add files…", command=self.add_files).pack(side="right")
+        ttk.Button(row3, text="Run Extract (queue)", command=self.run_queue).pack(side="right", padx=(0, 8))
 
         hint = "Drag & drop files into this window to add them to queue." if _HAS_DND else \
                "Drag & drop disabled (install: pip install tkinterdnd2). Use 'Add files…'."
         ttk.Label(frm, text=hint).pack(anchor="w", pady=(4, 2))
 
-        box = ttk.Frame(frm); box.pack(fill="both", expand=False, pady=(6, 6))
+        box = ttk.Frame(frm)
+        box.pack(fill="both", expand=False, pady=(6, 6))
         ttk.Label(box, text="Queue:").pack(anchor="w")
         self.lst = tk.Listbox(box, height=7, selectmode="extended")
         self.lst.pack(fill="both", expand=True, side="left")
@@ -107,7 +119,8 @@ class App(BaseTk):
         sb.pack(side="left", fill="y")
         self.lst.configure(yscrollcommand=sb.set)
 
-        btncol = ttk.Frame(box); btncol.pack(side="left", fill="y", padx=(8, 0))
+        btncol = ttk.Frame(box)
+        btncol.pack(side="left", fill="y", padx=(8, 0))
         ttk.Button(btncol, text="Remove selected", command=self.remove_selected).pack(fill="x", pady=(0, 6))
         ttk.Button(btncol, text="Clear", command=self.clear_queue).pack(fill="x")
 
@@ -119,6 +132,8 @@ class App(BaseTk):
         yscroll = ttk.Scrollbar(frm, orient="vertical", command=self.txt.yview)
         yscroll.place(relx=1.0, rely=0.30, relheight=0.64, anchor="ne")
         self.txt.configure(xscrollcommand=xscroll.set, yscrollcommand=yscroll.set)
+
+        self._sync_format_options()
 
     def pick_exe(self):
         path = filedialog.askopenfilename(
@@ -171,9 +186,29 @@ class App(BaseTk):
 
     def _output_path_for(self, inp: str) -> str:
         stem, _ext = os.path.splitext(os.path.basename(inp))
-        outname = stem + ".json"
         outdir = self.outdir_var.get().strip()
-        return os.path.join(outdir if outdir else os.path.dirname(inp), outname)
+        target_dir = outdir if outdir else os.path.dirname(inp)
+
+        if self.format_var.get() == "json":
+            outname = stem + ".json"
+        else:
+            safe_stem = stem if stem.endswith("+") else stem + "+"
+            outname = safe_stem + ".log"
+
+        outpath = os.path.join(target_dir, outname)
+        input_path = os.path.normcase(os.path.abspath(inp))
+
+        if os.path.normcase(os.path.abspath(outpath)) == input_path and self.format_var.get() == "text":
+            safe_stem = stem + "++"
+            outpath = os.path.join(target_dir, safe_stem + ".log")
+
+        return outpath
+
+    def _sync_format_options(self):
+        is_json = self.format_var.get() == "json"
+        if not is_json:
+            self.pretty_var.set(False)
+        self.pretty_check.configure(state="normal" if is_json else "disabled")
 
     def run_queue(self):
         exe = self.exe_var.get().strip()
@@ -199,9 +234,10 @@ class App(BaseTk):
 
             for idx, inp in enumerate(items, 1):
                 outp = self._output_path_for(inp)
+                output_format = self.format_var.get().strip().lower() or "json"
 
-                args = [exe, "extract", "-input", inp, "-output", outp]
-                if self.pretty_var.get():
+                args = [exe, "extract", "-input", inp, "-output", outp, "-format", output_format]
+                if output_format == "json" and self.pretty_var.get():
                     args.append("-pretty")
                 if self.all_var.get():
                     args.append("-all")
