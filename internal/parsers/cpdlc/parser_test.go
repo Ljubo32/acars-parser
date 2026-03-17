@@ -453,6 +453,67 @@ func TestParseUplinkSquawkBeaconCode(t *testing.T) {
 	}
 }
 
+func TestParseUplinkClimbToReachAltitudeByTime(t *testing.T) {
+	parser := &Parser{}
+
+	msg := &acars.Message{
+		ID:        1,
+		Label:     "AA",
+		Text:      "/BOMCAYA.AT1.B-20CJ008D6529E000E454",
+		Timestamp: "2026-03-17T00:00:00Z",
+	}
+
+	result := parser.Parse(msg)
+	if result == nil {
+		t.Fatal("Parse() returned nil")
+	}
+
+	r := result.(*Result)
+	if r.Error != "" {
+		t.Fatalf("unexpected parse error: %s", r.Error)
+	}
+	if r.Header == nil || r.Header.MsgID != 1 {
+		t.Fatalf("unexpected header: %+v", r.Header)
+	}
+	if len(r.Elements) != 1 {
+		t.Fatalf("expected 1 element, got %d", len(r.Elements))
+	}
+
+	first := r.Elements[0]
+	if first.ID != 26 {
+		t.Fatalf("expected first element 26, got %d", first.ID)
+	}
+	if first.Label != "CLIMB TO REACH [altitude] BY [time]" {
+		t.Fatalf("unexpected first label: %q", first.Label)
+	}
+	data, ok := first.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected first element compound data, got %T", first.Data)
+	}
+	altitude, ok := data["altitude"].(*Altitude)
+	if !ok || altitude == nil || altitude.Type != "flight_level" || altitude.Value != 360 {
+		t.Fatalf("unexpected altitude: %#v", data["altitude"])
+	}
+	altitudeType, ok := data["type"].(string)
+	if !ok || altitudeType != "flight_level" {
+		t.Fatalf("unexpected top-level altitude type: %#v", data["type"])
+	}
+	altitudeValue, ok := data["value"].(int)
+	if !ok || altitudeValue != 360 {
+		t.Fatalf("unexpected top-level altitude value: %#v", data["value"])
+	}
+	timeValue, ok := data["time"].(*Time)
+	if !ok || timeValue == nil || timeValue.Hours != 15 || timeValue.Minutes != 0 {
+		t.Fatalf("unexpected time: %#v", data["time"])
+	}
+	if first.Text != "CLIMB TO REACH FL360 BY 15:00" {
+		t.Fatalf("unexpected first text: %q", first.Text)
+	}
+	if r.FormattedText != "CLIMB TO REACH FL360 BY 15:00" {
+		t.Fatalf("unexpected formatted text: %q", r.FormattedText)
+	}
+}
+
 func TestParseConnectRequestFacilityDesignationTP4Table(t *testing.T) {
 	parser := &Parser{}
 
