@@ -8,6 +8,8 @@ Install:
 import os
 import threading
 import subprocess
+import json
+import tempfile
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -67,6 +69,7 @@ class App(BaseTk):
         self.pretty_var = tk.BooleanVar(value=True)
         self.all_var = tk.BooleanVar(value=True)
         self.stats_var = tk.BooleanVar(value=False)
+        self.merge_var = tk.BooleanVar(value=False)
 
         self._build_ui()
 
@@ -103,6 +106,7 @@ class App(BaseTk):
         self.pretty_check.pack(side="left")
         ttk.Checkbutton(row3, text="All (-all)", variable=self.all_var).pack(side="left", padx=(10, 0))
         ttk.Checkbutton(row3, text="Stats (-stats) if supported", variable=self.stats_var).pack(side="left", padx=(10, 0))
+        ttk.Checkbutton(row3, text="Merge outputs into one file", variable=self.merge_var).pack(side="left", padx=(10, 0))
         ttk.Button(row3, text="Add files…", command=self.add_files).pack(side="right")
         ttk.Button(row3, text="Run Extract (queue)", command=self.run_queue).pack(side="right", padx=(0, 8))
 
@@ -204,6 +208,149 @@ class App(BaseTk):
 
         return outpath
 
+    def _shared_output_path_for(self, items) -> str:
+        first_input = items[0]
+        stem, _ext = os.path.splitext(os.path.basename(first_input))
+        shared_stem = (stem[:11] or stem or "merged_out").rstrip(" .")
+        if not shared_stem:
+            shared_stem = "merged_out"
+
+        outdir = self.outdir_var.get().strip()
+        target_dir = outdir if outdir else os.path.dirname(first_input)
+        suffix = ".json" if self.format_var.get() == "json" else ".log"
+
+        avoid_paths = {
+            os.path.normcase(os.path.abspath(path))
+            for path in items
+        }
+
+        candidate = os.path.join(target_dir, shared_stem + suffix)
+        if os.path.normcase(os.path.abspath(candidate)) not in avoid_paths and not os.path.exists(candidate):
+            return candidate
+
+        index = 1
+        while True:
+            candidate = os.path.join(target_dir, f"{shared_stem}_{index}{suffix}")
+            if os.path.normcase(os.path.abspath(candidate)) not in avoid_paths and not os.path.exists(candidate):
+                return candidate
+            index += 1
+
+    def _run_extract_process(self, args, creationflags: int):
+        try:
+            p = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                creationflags=creationflags,
+            )
+            assert p.stdout is not None
+            combined = ""
+            for line in p.stdout:
+                combined += line
+                self._append(line)
+            rc = p.wait()
+
+            if rc != 0 and self.stats_var.get() and ("flag provided but not defined: -stats" in combined):
+                self._append("\n[INFO] This build does not support -stats. Retrying without -stats...\n")
+                args = [arg for arg in args if arg != "-stats"]
+                self._append("  " + " ".join(args) + "\n")
+                p = subprocess.Popen(
+                    args,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    creationflags=creationflags,
+                )
+                assert p.stdout is not None
+                combined = ""
+                for line in p.stdout:
+                    combined += line
+                    self._append(line)
+                rc = p.wait()
+
+            return rc, combined
+        except Exception as e:
+            self._append(f"[ERROR] {e}\n")
+            return -1, str(e)
+
+    def _merge_outputs(self, items, exe: str, creationflags: int):
+        merged_output = self._shared_output_path_for(items)
+        output_format = self.format_var.get().strip().lower() or "json"
+        merged_json = []
+        merged_text_parts = []
+        success_count = 0
+
+        self._append(f"[INFO] Merge mode enabled. Final output: {merged_output}\n")
+
+        for idx, inp in enumerate(items, 1):
+            suffix = ".json" if output_format == "json" else ".log"
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+            temp_file.close()
+            temp_path = temp_file.name
+
+            args = [exe, "extract", "-input", inp, "-output", temp_path, "-format", output_format]
+            if output_format == "json" and self.pretty_var.get():
+                args.append("-pretty")
+            if self.all_var.get():
+                args.append("-all")
+            if self.stats_var.get():
+                args.append("-stats")
+
+            self._append(f"\n[{idx}/{len(items)}] Running for merge:\n  " + " ".join(args) + "\n")
+
+            try:
+                rc, _combined = self._run_extract_process(args, creationflags)
+                if rc != 0 or not os.path.exists(temp_path):
+                    self._append(f"[FAIL] Exit code: {rc}\n")
+                    self._append(f"       Temporary output: {temp_path}\n")
+                    continue
+
+                if output_format == "json":
+                    with open(temp_path, "r", encoding="utf-8") as f:
+                        payload = json.load(f)
+                    if isinstance(payload, list):
+                        merged_json.extend(payload)
+                    else:
+                        merged_json.append(payload)
+                else:
+                    with open(temp_path, "r", encoding="utf-8") as f:
+                        text_payload = f.read()
+                    if text_payload:
+                        merged_text_parts.append(text_payload.rstrip("\n"))
+
+                success_count += 1
+                self._append(f"[OK] Merged input: {inp}\n")
+            except Exception as e:
+                self._append(f"[ERROR] Failed to merge output from {inp}: {e}\n")
+            finally:
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
+        if success_count == 0:
+            self._append("\n[FAIL] No successful inputs to merge.\n")
+            return
+
+        try:
+            if output_format == "json":
+                with open(merged_output, "w", encoding="utf-8") as f:
+                    if self.pretty_var.get():
+                        json.dump(merged_json, f, indent=2)
+                    else:
+                        json.dump(merged_json, f, separators=(",", ":"))
+                    f.write("\n")
+            else:
+                with open(merged_output, "w", encoding="utf-8") as f:
+                    content = "\n\n".join(part for part in merged_text_parts if part)
+                    if content:
+                        f.write(content + "\n")
+
+            self._append(f"\n[OK] Merged output written: {merged_output}\n")
+        except Exception as e:
+            self._append(f"\n[ERROR] Failed to write merged output: {e}\n")
+
     def _sync_format_options(self):
         is_json = self.format_var.get() == "json"
         if not is_json:
@@ -232,6 +379,11 @@ class App(BaseTk):
             if os.name == "nt":
                 creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+            if self.merge_var.get():
+                self._merge_outputs(items, exe, creationflags)
+                self._append("\nDone.\n")
+                return
+
             for idx, inp in enumerate(items, 1):
                 outp = self._output_path_for(inp)
                 output_format = self.format_var.get().strip().lower() or "json"
@@ -245,46 +397,13 @@ class App(BaseTk):
                     args.append("-stats")
 
                 self._append(f"\n[{idx}/{len(items)}] Running:\n  " + " ".join(args) + "\n")
+                rc, _combined = self._run_extract_process(args, creationflags)
 
-                try:
-                    p = subprocess.Popen(
-                        args,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        creationflags=creationflags,
-                    )
-                    assert p.stdout is not None
-                    combined = ""
-                    for line in p.stdout:
-                        combined += line
-                        self._append(line)
-                    rc = p.wait()
-
-                    if rc != 0 and self.stats_var.get() and ("flag provided but not defined: -stats" in combined):
-                        self._append("\n[INFO] This build does not support -stats. Retrying without -stats...\n")
-                        args2 = [a for a in args if a != "-stats"]
-                        self._append("  " + " ".join(args2) + "\n")
-                        p2 = subprocess.Popen(
-                            args2,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            text=True,
-                            creationflags=creationflags,
-                        )
-                        assert p2.stdout is not None
-                        for line in p2.stdout:
-                            self._append(line)
-                        rc = p2.wait()
-
-                    if rc == 0 and os.path.exists(outp):
-                        self._append(f"[OK] Output: {outp}\n")
-                    else:
-                        self._append(f"[FAIL] Exit code: {rc}\n")
-                        self._append(f"       Expected output: {outp}\n")
-
-                except Exception as e:
-                    self._append(f"[ERROR] {e}\n")
+                if rc == 0 and os.path.exists(outp):
+                    self._append(f"[OK] Output: {outp}\n")
+                else:
+                    self._append(f"[FAIL] Exit code: {rc}\n")
+                    self._append(f"       Expected output: {outp}\n")
 
             self._append("\nDone.\n")
 
