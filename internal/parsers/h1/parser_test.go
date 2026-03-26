@@ -81,6 +81,9 @@ func TestFPNParseWithCoordinates(t *testing.T) {
 	if !ok {
 		t.Fatal("Result is not FPNResult")
 	}
+	if fpn.MsgType != "FPN" {
+		t.Fatalf("MsgType = %q, want %q", fpn.MsgType, "FPN")
+	}
 
 	// Check that we got waypoints with coordinates.
 	if len(fpn.Waypoints) == 0 {
@@ -118,83 +121,70 @@ func TestFPNParseWithCoordinates(t *testing.T) {
 
 func TestDetectTruncation(t *testing.T) {
 	tests := []struct {
-		name      string
-		text      string
-		waypoints []RouteWaypoint
-		route     string
-		want      bool
+		name  string
+		text  string
+		route string
+		want  bool
 	}{
 		{
-			name:      "normal complete message",
-			text:      "FPN/SN123:DA:KSFO:AA:KLAX:F:WAYP1..WAYP2",
-			waypoints: []RouteWaypoint{{Name: "WAYP1"}, {Name: "WAYP2"}},
-			route:     "WAYP1..WAYP2",
-			want:      false,
+			name:  "normal complete message",
+			text:  "FPN/SN123:DA:KSFO:AA:KLAX:F:WAYP1..WAYP2",
+			route: "WAYP1..WAYP2",
+			want:  false,
 		},
 		{
-			name:      "multi-part without terminator",
-			text:      "FPN/SN123#M1:DA:KSFO:AA:KLAX",
-			waypoints: nil,
-			route:     "",
-			want:      true,
+			name:  "multi-part without terminator",
+			text:  "FPN/SN123#M1:DA:KSFO:AA:KLAX",
+			route: "",
+			want:  true,
 		},
 		{
-			name:      "multi-part with terminator",
-			text:      "FPN/SN123#M1:DA:KSFO#MD:AA:KLAX",
-			waypoints: nil,
-			route:     "",
-			want:      false,
+			name:  "multi-part with terminator",
+			text:  "FPN/SN123#M1:DA:KSFO#MD:AA:KLAX",
+			route: "",
+			want:  false,
 		},
 		{
-			name: "all waypoints have coords",
-			text: "FPN:DA:KSFO:AA:KLAX:F:WPT1,N33490E034050..WPT2,N34000E035000",
-			waypoints: []RouteWaypoint{
-				{Name: "WPT1", Latitude: 33.8, Longitude: 34.0},
-				{Name: "WPT2", Latitude: 34.0, Longitude: 35.0},
-			},
+			name:  "all waypoints have coords",
+			text:  "FPN:DA:KSFO:AA:KLAX:F:WPT1,N33490E034050..WPT2,N34000E035000",
 			route: "WPT1,N33490E034050..WPT2,N34000E035000",
 			want:  false,
 		},
 		{
-			name:      "ends with colon",
-			text:      "FPN:DA:KSFO:AA:KLAX:",
-			waypoints: nil,
-			route:     "",
-			want:      true,
+			name:  "ends with colon",
+			text:  "FPN:DA:KSFO:AA:KLAX:",
+			route: "",
+			want:  true,
 		},
 		{
-			name:      "ends with comma",
-			text:      "FPN:DA:KSFO:AA:KLAX:F:WAYP1,",
-			waypoints: nil,
-			route:     "WAYP1,",
-			want:      true,
+			name:  "ends with comma",
+			text:  "FPN:DA:KSFO:AA:KLAX:F:WAYP1,",
+			route: "WAYP1,",
+			want:  true,
 		},
 		{
-			name:      "ends with double period",
-			text:      "FPN:DA:KSFO:AA:KLAX:F:WAYP1..",
-			waypoints: nil,
-			route:     "WAYP1..",
-			want:      true,
+			name:  "ends with double period",
+			text:  "FPN:DA:KSFO:AA:KLAX:F:WAYP1..",
+			route: "WAYP1..",
+			want:  true,
 		},
 		{
-			name:      "incomplete coordinate after comma",
-			text:      "FPN:DA:KSFO:AA:KLAX:F:WAYP1,N334",
-			waypoints: nil,
-			route:     "WAYP1,N334",
-			want:      true,
+			name:  "incomplete coordinate after comma",
+			text:  "FPN:DA:KSFO:AA:KLAX:F:WAYP1,N334",
+			route: "WAYP1,N334",
+			want:  true,
 		},
 		{
-			name:      "complete coordinate after comma",
-			text:      "FPN:DA:KSFO:AA:KLAX:F:WAYP1,N33490E034050",
-			waypoints: nil,
-			route:     "WAYP1,N33490E034050",
-			want:      false,
+			name:  "complete coordinate after comma",
+			text:  "FPN:DA:KSFO:AA:KLAX:F:WAYP1,N33490E034050",
+			route: "WAYP1,N33490E034050",
+			want:  false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := detectTruncation(tt.text, tt.waypoints, tt.route)
+			got := detectTruncation(tt.text, tt.route)
 			if got != tt.want {
 				t.Errorf("detectTruncation() = %v, want %v", got, tt.want)
 			}
@@ -235,6 +225,9 @@ func TestH1PosParse_WindSpeedThreeDigits(t *testing.T) {
 	if pos.WindSpeed != 44 {
 		t.Fatalf("wind_speed = %d, want 44", pos.WindSpeed)
 	}
+	if pos.MsgType != "POS" {
+		t.Fatalf("MsgType = %q, want %q", pos.MsgType, "POS")
+	}
 }
 
 func TestH1PosParse_SimpleWaypoints(t *testing.T) {
@@ -269,6 +262,142 @@ func TestH1PosParse_SimpleWaypoints(t *testing.T) {
 	}
 	if pos.FlightLevel != 350 {
 		t.Errorf("flight_level = %d, want 350", pos.FlightLevel)
+	}
+	if pos.MsgType != "POS" {
+		t.Fatalf("MsgType = %q, want %q", pos.MsgType, "POS")
+	}
+}
+
+func TestPWIParseEmitsMsgType(t *testing.T) {
+	msg := &acars.Message{
+		ID:        77,
+		Label:     "H1",
+		Text:      "PWI/WD360,TITIL,267041,360M58.RELGE,248035,360M58.ARLIF,241034,360M58.GASBI,209032,360M56.ABTEK,203033,360M55.LEKBA,201034,360M54.LEYLA,199033,360M52.ADEKI,198030,360M51.BADIR,196026,360M50.LAGAS,196020,360M49.AGISO",
+		Timestamp: "2026-03-20T00:00:00Z",
+		Tail:      "TESTPWI",
+	}
+
+	parser := &PWIParser{}
+	res := parser.Parse(msg)
+	if res == nil {
+		t.Fatalf("expected parse result, got nil")
+	}
+
+	pwi, ok := res.(*PWIResult)
+	if !ok {
+		t.Fatalf("expected *PWIResult, got %T", res)
+	}
+
+	if pwi.MsgType != "PWI" {
+		t.Fatalf("MsgType = %q, want %q", pwi.MsgType, "PWI")
+	}
+	if len(pwi.RouteWinds) != 1 {
+		t.Fatalf("len(RouteWinds) = %d, want 1", len(pwi.RouteWinds))
+	}
+	if pwi.RouteWinds[0].FlightLevel != 360 {
+		t.Fatalf("RouteWinds[0].FlightLevel = %d, want 360", pwi.RouteWinds[0].FlightLevel)
+	}
+	if len(pwi.RouteWinds[0].Waypoints) == 0 {
+		t.Fatal("expected parsed route wind waypoints, got none")
+	}
+}
+
+func TestPWIParseCoordinateLeadingWaypointsWithoutTemperature(t *testing.T) {
+	msg := &acars.Message{
+		ID:        78,
+		Label:     "H1",
+		Text:      "PWI/WD390,N24012E078331,292064.N24425E077165,284075.IBANI,284073.NIKOT,274080.NOKOK,274080.ISKEN,270080.LATOS,268090.VIKIT,264095.RK,262094.HILAL,260079.ZB,260081.REGET,258082.SAJAN,258082.LAKRA,258082.HANGU,262082.PS,262082.ATROL,254102.GERRY,254102.MOTMO,254102.FIRUZ,254102.VAJEN,252108.DAROW,248106.BUTRA,248106.USETU,246108.OGNOB,246107.TOLIB,246107.BUPOR,244105/WD340,N24012E078331,296067,340M41.N24425E077165,292070,340M42.IBANI,286072,340M42.NIKOT,282081,340M43.NOKOK,282081,340M43.ISKEN,2780",
+		Timestamp: "2026-03-20T00:00:00Z",
+		Tail:      "TESTPWI1",
+	}
+
+	parser := &PWIParser{}
+	res := parser.Parse(msg)
+	if res == nil {
+		t.Fatal("expected parse result, got nil")
+	}
+
+	pwi, ok := res.(*PWIResult)
+	if !ok {
+		t.Fatalf("expected *PWIResult, got %T", res)
+	}
+	if len(pwi.RouteWinds) != 2 {
+		t.Fatalf("len(RouteWinds) = %d, want 2", len(pwi.RouteWinds))
+	}
+	if len(pwi.RouteWinds[0].Waypoints) < 2 {
+		t.Fatalf("expected first route wind layer to have coordinate waypoints, got %d", len(pwi.RouteWinds[0].Waypoints))
+	}
+
+	first := pwi.RouteWinds[0].Waypoints[0]
+	if first.Waypoint != "N24012E078331" {
+		t.Fatalf("first waypoint = %q, want %q", first.Waypoint, "N24012E078331")
+	}
+	if abs(first.Latitude-24.02) > 0.01 {
+		t.Fatalf("first latitude = %v, want about 24.02", first.Latitude)
+	}
+	if abs(first.Longitude-78.55166666666666) > 0.01 {
+		t.Fatalf("first longitude = %v, want about 78.5517", first.Longitude)
+	}
+	if first.WindDir != 292 || first.WindSpeed != 64 {
+		t.Fatalf("first wind = %d/%d, want 292/64", first.WindDir, first.WindSpeed)
+	}
+
+	second := pwi.RouteWinds[0].Waypoints[1]
+	if second.Waypoint != "N24425E077165" {
+		t.Fatalf("second waypoint = %q, want %q", second.Waypoint, "N24425E077165")
+	}
+	if abs(second.Latitude-24.708333333333332) > 0.01 {
+		t.Fatalf("second latitude = %v, want about 24.7083", second.Latitude)
+	}
+	if abs(second.Longitude-77.275) > 0.01 {
+		t.Fatalf("second longitude = %v, want about 77.275", second.Longitude)
+	}
+	if second.WindDir != 284 || second.WindSpeed != 75 {
+		t.Fatalf("second wind = %d/%d, want 284/75", second.WindDir, second.WindSpeed)
+	}
+}
+
+func TestPWIParseCoordinateLeadingWaypointsWithTemperature(t *testing.T) {
+	msg := &acars.Message{
+		ID:        79,
+		Label:     "H1",
+		Text:      "PWI/WD410,S15000E090000,080012,410M58.S20000E095000,021025,410M57.S25000E101000,333012,410M56.S28000E105000,247028,410M55/WD390,S15000E090000,074010,390M53.S20000E095000,010019,390M51.S25000E101000,312010,390M51.S28000E105000,246031,390M50/WD370,S15000E090000,056011,370M47.S20000E095000,015013,370M45.S25000E101000,304006,370M45.S28000E105000,257030,370M45/WD350,S15000E090000,040013,350M42.S20000E095000,028013,350M40.S25000E101000,313004,350M40.S28000E105000,266031,350M40/DD100161037.200176050.31",
+		Timestamp: "2026-03-20T00:00:00Z",
+		Tail:      "TESTPWI2",
+	}
+
+	parser := &PWIParser{}
+	res := parser.Parse(msg)
+	if res == nil {
+		t.Fatal("expected parse result, got nil")
+	}
+
+	pwi, ok := res.(*PWIResult)
+	if !ok {
+		t.Fatalf("expected *PWIResult, got %T", res)
+	}
+	if len(pwi.RouteWinds) != 4 {
+		t.Fatalf("len(RouteWinds) = %d, want 4", len(pwi.RouteWinds))
+	}
+	if len(pwi.DescentWinds) == 0 {
+		t.Fatal("expected descent winds, got none")
+	}
+
+	first := pwi.RouteWinds[0].Waypoints[0]
+	if first.Waypoint != "S15000E090000" {
+		t.Fatalf("first waypoint = %q, want %q", first.Waypoint, "S15000E090000")
+	}
+	if abs(first.Latitude-(-15.0)) > 0.01 {
+		t.Fatalf("first latitude = %v, want about -15.0", first.Latitude)
+	}
+	if abs(first.Longitude-90.0) > 0.01 {
+		t.Fatalf("first longitude = %v, want about 90.0", first.Longitude)
+	}
+	if first.WindDir != 80 || first.WindSpeed != 12 {
+		t.Fatalf("first wind = %d/%d, want 80/12", first.WindDir, first.WindSpeed)
+	}
+	if first.Temperature != -58 {
+		t.Fatalf("first temperature = %d, want -58", first.Temperature)
 	}
 }
 
@@ -307,6 +436,9 @@ func TestH1PosParse_WaypointsWithDashAndNumbers(t *testing.T) {
 	}
 	if pos.Temperature != -50 {
 		t.Errorf("temperature = %d, want -50", pos.Temperature)
+	}
+	if pos.MsgType != "POS" {
+		t.Fatalf("MsgType = %q, want %q", pos.MsgType, "POS")
 	}
 
 	// Print full result for verification
@@ -357,6 +489,9 @@ func TestH1PosParse_EmptyWaypoint(t *testing.T) {
 	}
 	if pos.WindSpeed != 63 {
 		t.Errorf("wind_speed = %d, want 63", pos.WindSpeed)
+	}
+	if pos.MsgType != "POS" {
+		t.Fatalf("MsgType = %q, want %q", pos.MsgType, "POS")
 	}
 
 	// Print full result for verification

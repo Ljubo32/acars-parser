@@ -14,6 +14,7 @@ type Result struct {
 	MsgID         int64   `json:"message_id"`
 	Timestamp     string  `json:"timestamp"`
 	Tail          string  `json:"tail,omitempty"`
+	MsgType       string  `json:"msg_type,omitempty"`
 	Registration  string  `json:"registration,omitempty"`
 	Sequence      string  `json:"sequence,omitempty"`
 	MsgNo         int     `json:"msg_no,omitempty"`
@@ -117,6 +118,7 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 		MsgID:         int64(msg.ID),
 		Timestamp:     msg.Timestamp,
 		Tail:          registration,
+		MsgType:       "EBSB",
 		Registration:  registration,
 		Sequence:      header[4:6],
 		MsgNo:         msgNo,

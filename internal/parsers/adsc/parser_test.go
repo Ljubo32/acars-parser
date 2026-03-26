@@ -273,6 +273,167 @@ func TestParseUplinkEventContractGroups(t *testing.T) {
 	}
 }
 
+func TestParseUplinkEventContractDotlessADSFormat(t *testing.T) {
+	p := &Parser{}
+	msg := &acars.Message{
+		ID:        3,
+		Timestamp: "2026-03-20T00:00:00Z",
+		Label:     "A6",
+		Text:      "/RPHIAYA.ADSRPC7773080712B2131E781E1414EAE6",
+	}
+
+	result := p.Parse(msg)
+	if result == nil {
+		t.Fatalf("Parse returned nil")
+	}
+
+	r, ok := result.(*Result)
+	if !ok {
+		t.Fatalf("Result is not *Result type")
+	}
+
+	if r.MessageType != "uplink_contract_request" {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("MessageType = %q, want %q; result=%s", r.MessageType, "uplink_contract_request", string(payload))
+	}
+
+	if r.Registration != "RPC7773" {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("Registration = %q, want %q; result=%s", r.Registration, "RPC7773", string(payload))
+	}
+
+	if r.ContractRequest == nil {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("ContractRequest is nil; result=%s", string(payload))
+	}
+
+	if r.ContractRequest.Kind != "event" {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("Kind = %q, want %q; result=%s", r.ContractRequest.Kind, "event", string(payload))
+	}
+
+	if r.ContractRequest.ContractNum != 7 {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("ContractNum = %d, want 7; result=%s", r.ContractRequest.ContractNum, string(payload))
+	}
+
+	if len(r.ContractRequest.Groups) != 3 {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("len(Groups) = %d, want 3; result=%s", len(r.ContractRequest.Groups), string(payload))
+	}
+
+	vertSpeed := r.ContractRequest.Groups[0]
+	if vertSpeed.ThresholdFPM == nil || *vertSpeed.ThresholdFPM != 4992 {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("ThresholdFPM = %v, want 4992; result=%s", vertSpeed.ThresholdFPM, string(payload))
+	}
+	if vertSpeed.HigherThan == nil || *vertSpeed.HigherThan {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("HigherThan = %v, want false; result=%s", vertSpeed.HigherThan, string(payload))
+	}
+
+	altitudeRange := r.ContractRequest.Groups[1]
+	if altitudeRange.FloorAlt == nil || *altitudeRange.FloorAlt != 30800 {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("FloorAlt = %v, want 30800; result=%s", altitudeRange.FloorAlt, string(payload))
+	}
+	if altitudeRange.CeilingAlt == nil || *altitudeRange.CeilingAlt != 31200 {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("CeilingAlt = %v, want 31200; result=%s", altitudeRange.CeilingAlt, string(payload))
+	}
+
+	waypoint := r.ContractRequest.Groups[2]
+	if !waypoint.ReportWaypointChanges {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("ReportWaypointChanges = %v, want true; result=%s", waypoint.ReportWaypointChanges, string(payload))
+	}
+}
+
+func TestParseUplinkPeriodicContractDotlessADSFormat(t *testing.T) {
+	p := &Parser{}
+	msg := &acars.Message{
+		ID:        4,
+		Timestamp: "2026-03-20T00:00:00Z",
+		Label:     "A6",
+		Text:      "/FUKJJYA.ADSRPC777307030BC40D010E010F011501253FDB",
+	}
+
+	result := p.Parse(msg)
+	if result == nil {
+		t.Fatalf("Parse returned nil")
+	}
+
+	r, ok := result.(*Result)
+	if !ok {
+		t.Fatalf("Result is not *Result type")
+	}
+
+	if r.MessageType != "uplink_contract_request" {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("MessageType = %q, want %q; result=%s", r.MessageType, "uplink_contract_request", string(payload))
+	}
+
+	if r.Registration != "RPC7773" {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("Registration = %q, want %q; result=%s", r.Registration, "RPC7773", string(payload))
+	}
+
+	if r.ContractRequest == nil {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("ContractRequest is nil; result=%s", string(payload))
+	}
+
+	if r.ContractRequest.Kind != "periodic" {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("Kind = %q, want %q; result=%s", r.ContractRequest.Kind, "periodic", string(payload))
+	}
+
+	if r.ContractRequest.ContractNum != 3 {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("ContractNum = %d, want 3; result=%s", r.ContractRequest.ContractNum, string(payload))
+	}
+
+	if r.ContractRequest.IntervalSecs != 320 {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("IntervalSecs = %d, want 320; result=%s", r.ContractRequest.IntervalSecs, string(payload))
+	}
+
+	if len(r.ContractRequest.Groups) != 5 {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("len(Groups) = %d, want 5; result=%s", len(r.ContractRequest.Groups), string(payload))
+	}
+
+	if r.ContractRequest.Groups[0].IntervalSecs == nil || *r.ContractRequest.Groups[0].IntervalSecs != 320 {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("Groups[0].IntervalSecs = %v, want 320; result=%s", r.ContractRequest.Groups[0].IntervalSecs, string(payload))
+	}
+
+	if r.ContractRequest.Groups[1].Modulus == nil || *r.ContractRequest.Groups[1].Modulus != 1 {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("Predicted route modulus = %v, want 1; result=%s", r.ContractRequest.Groups[1].Modulus, string(payload))
+	}
+
+	if r.ContractRequest.Groups[2].Modulus == nil || *r.ContractRequest.Groups[2].Modulus != 1 {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("Earth reference modulus = %v, want 1; result=%s", r.ContractRequest.Groups[2].Modulus, string(payload))
+	}
+
+	if r.ContractRequest.Groups[3].Modulus == nil || *r.ContractRequest.Groups[3].Modulus != 1 {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("Air reference modulus = %v, want 1; result=%s", r.ContractRequest.Groups[3].Modulus, string(payload))
+	}
+
+	intent := r.ContractRequest.Groups[4]
+	if intent.Modulus == nil || *intent.Modulus != 1 {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("Aircraft intent modulus = %v, want 1; result=%s", intent.Modulus, string(payload))
+	}
+	if intent.ProjectionMins == nil || *intent.ProjectionMins != 37 {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("ProjectionMins = %v, want 37; result=%s", intent.ProjectionMins, string(payload))
+	}
+}
+
 func TestParseDownlinkAirRefMachScale(t *testing.T) {
 	p := &Parser{}
 	msg := &acars.Message{

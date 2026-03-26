@@ -22,4 +22,7 @@ func TestAGFSRHeadingGroundSpeedTemperature(t *testing.T) {
 	if result.Temperature != -60 {
 		t.Errorf("Expected temperature -60, got %d", result.Temperature)
 	}
+	if result.MsgType != "AGFSR" {
+		t.Errorf("Expected msg_type AGFSR, got %q", result.MsgType)
+	}
 }

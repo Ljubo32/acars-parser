@@ -10,10 +10,14 @@ import (
 
 // IMI (Interchange Message Identifier) markers for CPDLC messages.
 const (
-	IMI_AT1 = ".AT1." // CPDLC message (ACARS text).
-	IMI_CR1 = ".CR1." // Connection request.
-	IMI_CC1 = ".CC1." // Connection confirm.
-	IMI_DR1 = ".DR1." // Disconnect request.
+	IMI_AT1    = ".AT1." // CPDLC message (ACARS text).
+	IMI_CR1    = ".CR1." // Connection request.
+	IMI_CC1    = ".CC1." // Connection confirm.
+	IMI_DR1    = ".DR1." // Disconnect request.
+	imiAT1Bare = ".AT1"
+	imiCR1Bare = ".CR1"
+	imiCC1Bare = ".CC1"
+	imiDR1Bare = ".DR1"
 )
 
 // Result represents a decoded CPDLC message for the ACARS parser framework.
@@ -50,10 +54,10 @@ func (p *Parser) Priority() int    { return 50 } // Higher priority than generic
 
 // QuickCheck checks if the message contains CPDLC markers.
 func (p *Parser) QuickCheck(text string) bool {
-	return strings.Contains(text, IMI_AT1) ||
-		strings.Contains(text, IMI_CR1) ||
-		strings.Contains(text, IMI_CC1) ||
-		strings.Contains(text, IMI_DR1)
+	return strings.Contains(text, imiAT1Bare) ||
+		strings.Contains(text, imiCR1Bare) ||
+		strings.Contains(text, imiCC1Bare) ||
+		strings.Contains(text, imiDR1Bare)
 }
 
 // Parse parses a CPDLC message.
@@ -66,31 +70,14 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 	}
 
 	// Determine message type and extract payload.
-	var imi string
-	var payloadStart int
-
-	if idx := strings.Index(text, IMI_AT1); idx >= 0 {
-		result.MessageType = "cpdlc"
-		imi = IMI_AT1
-		payloadStart = idx + len(IMI_AT1)
-	} else if idx := strings.Index(text, IMI_CR1); idx >= 0 {
-		result.MessageType = "connect_request"
-		imi = IMI_CR1
-		payloadStart = idx + len(IMI_CR1)
-	} else if idx := strings.Index(text, IMI_CC1); idx >= 0 {
-		result.MessageType = "connect_confirm"
-		imi = IMI_CC1
-		payloadStart = idx + len(IMI_CC1)
-	} else if idx := strings.Index(text, IMI_DR1); idx >= 0 {
-		result.MessageType = "disconnect"
-		imi = IMI_DR1
-		payloadStart = idx + len(IMI_DR1)
-	} else {
+	imiStart, payloadStart, messageType := findCPDLCPayloadStart(text)
+	if imiStart < 0 {
 		return nil // No CPDLC markers found.
 	}
+	result.MessageType = messageType
 
 	// Extract ground station from before the IMI marker.
-	prefix := text[:payloadStart-len(imi)]
+	prefix := text[:imiStart]
 	if idx := strings.LastIndex(prefix, "/"); idx >= 0 {
 		result.GroundStation = prefix[idx+1:]
 	}
@@ -213,6 +200,44 @@ func isValidHex(s string) bool {
 		}
 	}
 	return true
+}
+
+func findCPDLCPayloadStart(text string) (imiStart int, payloadStart int, messageType string) {
+	type marker struct {
+		full        string
+		bare        string
+		messageType string
+	}
+
+	markers := []marker{
+		{full: IMI_AT1, bare: imiAT1Bare, messageType: "cpdlc"},
+		{full: IMI_CR1, bare: imiCR1Bare, messageType: "connect_request"},
+		{full: IMI_CC1, bare: imiCC1Bare, messageType: "connect_confirm"},
+		{full: IMI_DR1, bare: imiDR1Bare, messageType: "disconnect"},
+	}
+
+	bestIdx := -1
+	bestPayloadStart := -1
+	bestType := ""
+	for _, candidate := range markers {
+		if idx := strings.Index(text, candidate.full); idx >= 0 {
+			if bestIdx == -1 || idx < bestIdx {
+				bestIdx = idx
+				bestPayloadStart = idx + len(candidate.full)
+				bestType = candidate.messageType
+			}
+			continue
+		}
+		if idx := strings.Index(text, candidate.bare); idx >= 0 {
+			if bestIdx == -1 || idx < bestIdx {
+				bestIdx = idx
+				bestPayloadStart = idx + len(candidate.bare)
+				bestType = candidate.messageType
+			}
+		}
+	}
+
+	return bestIdx, bestPayloadStart, bestType
 }
 
 // formatMessage creates a human-readable summary of the CPDLC message.

@@ -84,6 +84,7 @@ func TestEB00Parse(t *testing.T) {
 			}
 
 			assertStringEqual(t, "tail", result.Tail, tt.registration)
+			assertStringEqual(t, "msg_type", result.MsgType, "EBSB")
 			assertStringEqual(t, "registration", result.Registration, tt.registration)
 			assertIntEqual(t, "msg_no", result.MsgNo, tt.msgNo)
 			assertStringEqual(t, "route", result.Route, tt.route)

@@ -109,6 +109,7 @@ func TestSB01Parse(t *testing.T) {
 				t.Fatalf("Expected *Result, got %T", res)
 			}
 
+			assertStringEqual(t, "msg_type", result.MsgType, "EBSB")
 			assertStringEqual(t, "registration", result.Registration, tt.registration)
 			assertStringEqual(t, "route", result.Route, tt.route)
 			assertStringEqual(t, "report_time", result.ReportTime, tt.reportTime)

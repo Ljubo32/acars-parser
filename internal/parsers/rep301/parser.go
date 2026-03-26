@@ -12,6 +12,7 @@ import (
 type Result struct {
 	MsgID         int64   `json:"message_id"`
 	Timestamp     string  `json:"timestamp"`
+	MsgType       string  `json:"msg_type,omitempty"`
 	Tail          string  `json:"tail,omitempty"`
 	Route         string  `json:"route,omitempty"`
 	Origin        string  `json:"origin,omitempty"`
@@ -75,6 +76,7 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 	return &Result{
 		MsgID:         int64(msg.ID),
 		Timestamp:     msg.Timestamp,
+		MsgType:       "REP301",
 		Tail:          tail,
 		Route:         origin + "-" + destination,
 		Origin:        origin,

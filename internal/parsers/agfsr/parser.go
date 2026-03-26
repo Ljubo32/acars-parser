@@ -30,6 +30,7 @@ func getCompiler() (*patterns.Compiler, error) {
 type Result struct {
 	MsgID       int64   `json:"message_id"`
 	Timestamp   string  `json:"timestamp"`
+	MsgType     string  `json:"msg_type,omitempty"`
 	Tail        string  `json:"tail,omitempty"`
 	FlightNum   string  `json:"flight_number,omitempty"`
 	DayOfMonth  int     `json:"day_of_month,omitempty"`
@@ -91,6 +92,7 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 	result := &Result{
 		MsgID:      int64(msg.ID),
 		Timestamp:  msg.Timestamp,
+		MsgType:    "AGFSR",
 		Tail:       msg.Tail,
 		FlightNum:  match.Captures["flight"],
 		Route:      match.Captures["route"],

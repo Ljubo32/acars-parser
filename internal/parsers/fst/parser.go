@@ -15,6 +15,7 @@ import (
 type Result struct {
 	MsgID          int64   `json:"-"`
 	Timestamp      string  `json:"timestamp"`
+	MsgType        string  `json:"msg_type,omitempty"`
 	Tail           string  `json:"tail,omitempty"`
 	Sequence       string  `json:"sequence,omitempty"`
 	Route          string  `json:"route,omitempty"`
@@ -89,6 +90,7 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 	result := &Result{
 		MsgID:     int64(msg.ID),
 		Timestamp: msg.Timestamp,
+		MsgType:   "FST",
 		Tail:      msg.Tail,
 		RawData:   msg.Text,
 	}

@@ -453,7 +453,7 @@ var (
 	// - "AT 1716Z" (Canadian/WestJet format)
 	// - "DEPART ... AT 1716Z" (alternative)
 	// - "P1844" after aircraft type (American format - P prefix means planned/proposed time)
-	depTimeRe = regexp.MustCompile(`(?:SKED\s*DEP\s*TIME|DEPART\s+\S+\s+AT|AT)\s+(\d{4})Z?`)
+	depTimeRe = regexp.MustCompile(`(?:SKED\s*DEP\s*TIME|DEPART\s+\S+\s+AT|AT|EOBT)\s+(\d{4})Z?`)
 	// Route patterns - multiple formats exist:
 	// 1. Australian: "ROUTE:" prefix
 	// 2. US Delta: "ROUTING" section between asterisk lines

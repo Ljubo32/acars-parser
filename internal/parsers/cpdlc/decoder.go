@@ -2,6 +2,7 @@ package cpdlc
 
 import (
 	"fmt"
+	"strings"
 )
 
 // Message represents a decoded CPDLC message.
@@ -1255,6 +1256,37 @@ func (d *Decoder) decodeFrequency() (*Frequency, error) {
 }
 
 func (d *Decoder) decodeUnitNameFrequency() (map[string]interface{}, error) {
+	start := d.br.Offset()
+
+	type candidate struct {
+		data   map[string]interface{}
+		score  int
+		offset int
+	}
+
+	var best *candidate
+	for _, reverseChoice := range []bool{false, true} {
+		_ = d.br.SetOffset(start)
+		data, err := d.decodeUnitNameFrequencyVariant(reverseChoice)
+		if err != nil {
+			continue
+		}
+		score := scoreUnitNameFrequency(data)
+		if best == nil || score > best.score {
+			best = &candidate{data: data, score: score, offset: d.br.Offset()}
+		}
+	}
+
+	if best == nil {
+		_ = d.br.SetOffset(start)
+		return nil, fmt.Errorf("unable to decode ICAO unit name/frequency")
+	}
+	_ = d.br.SetOffset(best.offset)
+
+	return best.data, nil
+}
+
+func (d *Decoder) decodeUnitNameFrequencyVariant(reverseChoice bool) (map[string]interface{}, error) {
 	// uM117/uM120 in FANS-1/A uses ICAOUnitNameFrequency:
 	//   ICAOUnitName ::= SEQUENCE {
 	//     icaoFacilityId      CHOICE { icaoFacilityDesignation IA5String(SIZE(4)), ... },
@@ -1265,7 +1297,7 @@ func (d *Decoder) decodeUnitNameFrequency() (map[string]interface{}, error) {
 	//
 	// NOTE: The choice bit + facility-function bits MUST be consumed, otherwise the decoder becomes
 	// misaligned and the following SEQUENCE OF elements gets decoded as garbage.
-	unit, err := d.decodeICAOUnitName()
+	unit, err := d.decodeICAOUnitName(reverseChoice)
 	if err != nil {
 		return nil, err
 	}
@@ -1287,16 +1319,44 @@ func (d *Decoder) decodeUnitNameFrequency() (map[string]interface{}, error) {
 }
 
 func (d *Decoder) decodePositionUnitNameFrequency() (map[string]interface{}, error) {
-	position, err := d.decodePosition()
-	if err != nil {
-		return nil, err
+	start := d.br.Offset()
+
+	type candidate struct {
+		data   map[string]interface{}
+		score  int
+		offset int
 	}
-	data, err := d.decodeUnitNameFrequency()
-	if err != nil {
-		return nil, err
+
+	var best *candidate
+	decoders := []func() (*Position, error){
+		d.decodePosition,
+		d.decodeObservedContactPosition,
 	}
-	data["position"] = position
-	return data, nil
+
+	for _, decodePosition := range decoders {
+		_ = d.br.SetOffset(start)
+		position, err := decodePosition()
+		if err != nil {
+			continue
+		}
+		data, err := d.decodeUnitNameFrequency()
+		if err != nil {
+			continue
+		}
+		data["position"] = position
+		score := scorePosition(position) + scoreUnitNameFrequency(data)
+		if best == nil || score > best.score {
+			best = &candidate{data: data, score: score, offset: d.br.Offset()}
+		}
+	}
+
+	if best == nil {
+		_ = d.br.SetOffset(start)
+		return nil, fmt.Errorf("unable to decode position/unit/frequency")
+	}
+	_ = d.br.SetOffset(best.offset)
+
+	return best.data, nil
 }
 
 func (d *Decoder) decodeTimeUnitNameFrequency() (map[string]interface{}, error) {
@@ -1318,7 +1378,7 @@ type ICAOUnitName struct {
 	Function    string
 }
 
-func (d *Decoder) decodeICAOUnitName() (*ICAOUnitName, error) {
+func (d *Decoder) decodeICAOUnitName(reverseChoice bool) (*ICAOUnitName, error) {
 	// ICAOFacilityIdentification is a CHOICE between:
 	//   0: ICAO facility designation (SIZE(4))
 	//   1: ICAO facility name (SIZE(3..18))
@@ -1327,8 +1387,13 @@ func (d *Decoder) decodeICAOUnitName() (*ICAOUnitName, error) {
 		return nil, err
 	}
 
+	isDesignation := choice == 0
+	if reverseChoice {
+		isDesignation = choice == 1
+	}
+
 	name := ""
-	if choice == 0 {
+	if isDesignation {
 		name, err = d.decodeIA5String(4)
 		if err != nil {
 			return nil, err
@@ -1372,6 +1437,131 @@ func (d *Decoder) decodeICAOUnitName() (*ICAOUnitName, error) {
 	}
 
 	return &ICAOUnitName{Designation: name, Function: fnStr}, nil
+}
+
+func (d *Decoder) decodeObservedContactPosition() (*Position, error) {
+	choice, err := d.br.ReadConstrainedInt(0, 4)
+	if err != nil {
+		return nil, err
+	}
+	if choice != 3 {
+		return nil, fmt.Errorf("unsupported observed contact position choice %d", choice)
+	}
+
+	coarseFlag, err := d.br.ReadBit()
+	if err != nil {
+		return nil, err
+	}
+	if coarseFlag {
+		return nil, fmt.Errorf("unsupported observed contact position subtype")
+	}
+
+	latDeg, err := d.br.ReadConstrainedInt(0, 90)
+	if err != nil {
+		return nil, err
+	}
+	latSouth, err := d.br.ReadBit()
+	if err != nil {
+		return nil, err
+	}
+	lonWest, err := d.br.ReadBit()
+	if err != nil {
+		return nil, err
+	}
+	lonDeg, err := d.br.ReadConstrainedInt(0, 180)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := d.br.ReadBits(5); err != nil {
+		return nil, err
+	}
+
+	lat := float64(latDeg)
+	lon := float64(lonDeg)
+	if latSouth {
+		lat = -lat
+	}
+	if lonWest {
+		lon = -lon
+	}
+
+	return &Position{
+		Type:      "latlon",
+		Latitude:  &lat,
+		Longitude: &lon,
+	}, nil
+}
+
+func scorePosition(position *Position) int {
+	if position == nil {
+		return 0
+	}
+	score := 0
+	if position.Name != "" {
+		score += 4
+	}
+	if position.Latitude != nil && position.Longitude != nil {
+		if *position.Latitude >= -90 && *position.Latitude <= 90 {
+			score += 2
+		}
+		if *position.Longitude >= -180 && *position.Longitude <= 180 {
+			score += 2
+		}
+	}
+	return score
+}
+
+func scoreUnitNameFrequency(data map[string]interface{}) int {
+	if data == nil {
+		return 0
+	}
+
+	score := 0
+	if unit, ok := data["unit"].(string); ok {
+		if isLikelyUnitString(unit) {
+			score += 6
+		}
+	}
+	if unitType, ok := data["unit_type"].(string); ok && unitType != "" {
+		score += 1
+	}
+	if freq, ok := data["frequency"].(*Frequency); ok && freq != nil && isLikelyFrequency(freq) {
+		score += 4
+	}
+
+	return score
+}
+
+func isLikelyUnitString(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	for _, ch := range value {
+		if ch < 32 || ch > 126 {
+			return false
+		}
+		if !(ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == ' ' || ch == '-' || ch == '/') {
+			return false
+		}
+	}
+	return true
+}
+
+func isLikelyFrequency(freq *Frequency) bool {
+	if freq == nil {
+		return false
+	}
+	switch freq.Type {
+	case "hf":
+		return freq.Value >= 2850 && freq.Value <= 28000
+	case "vhf", "uhf":
+		return freq.Value > 100 && freq.Value < 400
+	case "satcom":
+		return true
+	default:
+		return false
+	}
 }
 
 func (d *Decoder) decodeBeaconCode() (*BeaconCode, error) {
@@ -1431,19 +1621,29 @@ func (d *Decoder) decodeATISCode() (string, error) {
 }
 
 func (d *Decoder) decodeErrorInfo() (*ErrorInfo, error) {
-	// Error code (0-6).
-	code, err := d.br.ReadConstrainedInt(0, 6)
+	// FANSErrorInformation is constrained to 0..16 in the FANS ASN.1.
+	code, err := d.br.ReadConstrainedInt(0, 16)
 	if err != nil {
 		return nil, err
 	}
 	errorDescs := []string{
-		"unrecognized message reference number",
-		"logon data not accepted",
-		"insufficient resources",
-		"service unavailable",
-		"duplicate message reference number",
-		"no operational PDC",
-		"unexpected request reference",
+		"applicationError",
+		"duplicateMsgIdentificationNumber",
+		"unrecognizedMsgReferenceNumber",
+		"endServiceWithPendingMsgs",
+		"endServiceWithNoValidResponse",
+		"insufficientMsgStorageCapacity",
+		"noAvailableMsgIdentificationNumber",
+		"commandedTermination",
+		"insufficientData",
+		"unexpectedData",
+		"invalidData",
+		"reservedErrorMsg1",
+		"reservedErrorMsg2",
+		"reservedErrorMsg3",
+		"reservedErrorMsg4",
+		"reservedErrorMsg5",
+		"reservedErrorMsg6",
 	}
 	desc := ""
 	if code < len(errorDescs) {
@@ -1636,59 +1836,69 @@ func (d *Decoder) decodePlaceBearingDistance() (*PlaceBearingDistance, error) {
 }
 
 func (d *Decoder) decodeLatLon() (float64, float64, error) {
-	// Latitude degrees (0-90).
-	latDeg, err := d.br.ReadConstrainedInt(0, 90)
+	lat, err := d.decodeLatitude()
 	if err != nil {
 		return 0, 0, err
 	}
-	// Latitude minutes (0-59).
-	latMin, err := d.br.ReadConstrainedInt(0, 59)
+	lon, err := d.decodeLongitude()
 	if err != nil {
 		return 0, 0, err
 	}
-	// Latitude seconds (0-59).
-	latSec, err := d.br.ReadConstrainedInt(0, 59)
-	if err != nil {
-		return 0, 0, err
-	}
-	// Latitude direction (0=N, 1=S).
-	latDir, err := d.br.ReadConstrainedInt(0, 1)
-	if err != nil {
-		return 0, 0, err
-	}
-
-	lat := float64(latDeg) + float64(latMin)/60.0 + float64(latSec)/3600.0
-	if latDir == 1 {
-		lat = -lat
-	}
-
-	// Longitude degrees (0-180).
-	lonDeg, err := d.br.ReadConstrainedInt(0, 180)
-	if err != nil {
-		return 0, 0, err
-	}
-	// Longitude minutes (0-59).
-	lonMin, err := d.br.ReadConstrainedInt(0, 59)
-	if err != nil {
-		return 0, 0, err
-	}
-	// Longitude seconds (0-59).
-	lonSec, err := d.br.ReadConstrainedInt(0, 59)
-	if err != nil {
-		return 0, 0, err
-	}
-	// Longitude direction (0=E, 1=W).
-	lonDir, err := d.br.ReadConstrainedInt(0, 1)
-	if err != nil {
-		return 0, 0, err
-	}
-
-	lon := float64(lonDeg) + float64(lonMin)/60.0 + float64(lonSec)/3600.0
-	if lonDir == 1 {
-		lon = -lon
-	}
-
 	return lat, lon, nil
+}
+
+func (d *Decoder) decodeLatitude() (float64, error) {
+	hasMinutes, err := d.br.ReadBit()
+	if err != nil {
+		return 0, err
+	}
+	degrees, err := d.br.ReadConstrainedInt(0, 90)
+	if err != nil {
+		return 0, err
+	}
+	minutesTenth := 0
+	if hasMinutes {
+		minutesTenth, err = d.br.ReadConstrainedInt(0, 599)
+		if err != nil {
+			return 0, err
+		}
+	}
+	direction, err := d.br.ReadConstrainedInt(0, 1)
+	if err != nil {
+		return 0, err
+	}
+	value := float64(degrees) + (float64(minutesTenth) / 10.0 / 60.0)
+	if direction == 1 {
+		value = -value
+	}
+	return value, nil
+}
+
+func (d *Decoder) decodeLongitude() (float64, error) {
+	hasMinutes, err := d.br.ReadBit()
+	if err != nil {
+		return 0, err
+	}
+	degrees, err := d.br.ReadConstrainedInt(0, 180)
+	if err != nil {
+		return 0, err
+	}
+	minutesTenth := 0
+	if hasMinutes {
+		minutesTenth, err = d.br.ReadConstrainedInt(0, 599)
+		if err != nil {
+			return 0, err
+		}
+	}
+	direction, err := d.br.ReadConstrainedInt(0, 1)
+	if err != nil {
+		return 0, err
+	}
+	value := float64(degrees) + (float64(minutesTenth) / 10.0 / 60.0)
+	if direction == 1 {
+		value = -value
+	}
+	return value, nil
 }
 
 func (d *Decoder) decodeIA5String(length int) (string, error) {
@@ -1950,21 +2160,15 @@ func (d *Decoder) decodeRouteClearance() (*RouteClearance, error) {
 	}
 
 	if hasRouteInformation {
-		// FANSRouteInformation is a SEQUENCE (SIZE 1..128) OF FANSRouteInformationSequence.
-		// Each element is a CHOICE with position types.
-		// For now, decode as a sequence of position strings.
 		count, err := d.br.ReadConstrainedInt(1, 128)
 		if err != nil {
 			return nil, fmt.Errorf("routeInformation count: %w", err)
 		}
-		rc.RouteInformation = make([]string, 0, count)
-		for i := 0; i < count; i++ {
-			pos, err := d.decodeRouteInformationElement()
-			if err != nil {
-				return nil, fmt.Errorf("routeInformation[%d]: %w", i, err)
-			}
-			rc.RouteInformation = append(rc.RouteInformation, pos)
+		routeInfo, err := d.decodeRouteInformation(count)
+		if err != nil {
+			return nil, fmt.Errorf("routeInformation: %w", err)
 		}
+		rc.RouteInformation = routeInfo
 	}
 
 	if hasRouteInfoAdditional {
@@ -1984,6 +2188,135 @@ func (d *Decoder) decodeRouteClearance() (*RouteClearance, error) {
 	}
 
 	return rc, nil
+}
+
+type routeInformationCandidate struct {
+	element RouteInformationElement
+	offset  int
+	score   int
+}
+
+func (d *Decoder) decodeRouteInformation(count int) ([]RouteInformationElement, error) {
+	if count == 0 {
+		return nil, nil
+	}
+
+	start := d.br.Offset()
+	candidates, err := d.decodeRouteInformationElementCandidates()
+	if err != nil {
+		_ = d.br.SetOffset(start)
+		return nil, err
+	}
+
+	bestScore := -1
+	bestOffset := start
+	var bestRoute []RouteInformationElement
+	var firstErr error
+
+	for _, candidate := range candidates {
+		_ = d.br.SetOffset(candidate.offset)
+		rest, err := d.decodeRouteInformation(count - 1)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		totalScore := candidate.score + scoreRouteInformation(rest)
+		if totalScore > bestScore {
+			bestScore = totalScore
+			bestOffset = d.br.Offset()
+			bestRoute = append([]RouteInformationElement{candidate.element}, rest...)
+		}
+	}
+
+	if bestScore < 0 {
+		_ = d.br.SetOffset(start)
+		if firstErr != nil {
+			return nil, firstErr
+		}
+		return nil, fmt.Errorf("unable to decode route information")
+	}
+
+	_ = d.br.SetOffset(bestOffset)
+	return bestRoute, nil
+}
+
+func scoreRouteInformation(elements []RouteInformationElement) int {
+	score := 0
+	for _, element := range elements {
+		score += scoreRouteInformationElement(element)
+	}
+	return score
+}
+
+func scoreRouteInformationElement(element RouteInformationElement) int {
+	score := 0
+	switch element.Kind {
+	case "published_identifier":
+		score += 6
+		if element.Position == nil || !isLikelyRouteIdentifier(element.Position.Name) {
+			score -= 12
+		}
+	case "airway":
+		score += 5
+		if !isLikelyAirwayIdentifier(element.Airway) {
+			score -= 12
+		}
+	case "latlon":
+		score += 4
+		if element.Position == nil || element.Position.Latitude == nil || element.Position.Longitude == nil {
+			score -= 12
+			break
+		}
+		if isWholeDegree(*element.Position.Latitude) {
+			score += 2
+		}
+		if isWholeDegree(*element.Position.Longitude) {
+			score += 2
+		}
+	case "place_bearing_distance":
+		score += 3
+		if element.Position == nil || !isLikelyRouteIdentifier(element.Position.Name) {
+			score -= 8
+		}
+	default:
+		score += 1
+		if element.Text == "" {
+			score -= 4
+		}
+	}
+	return score
+}
+
+func isLikelyRouteIdentifier(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) < 2 || len(value) > 6 {
+		return false
+	}
+	for _, ch := range value {
+		if !(ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func isLikelyAirwayIdentifier(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) < 1 || len(value) > 6 {
+		return false
+	}
+	for _, ch := range value {
+		if !(ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func isWholeDegree(value float64) bool {
+	return value == float64(int(value))
 }
 
 // decodeRunway decodes a FANSRunway structure.
@@ -2074,48 +2407,184 @@ func (d *Decoder) decodeAirwayIdentifier() (string, error) {
 	return d.decodeIA5String(length)
 }
 
-// decodeRouteInformationElement decodes a single route information element.
-// FANSRouteInformationSequence is a CHOICE of various position types.
-func (d *Decoder) decodeRouteInformationElement() (string, error) {
+// decodeRouteInformationElementCandidates decodes a single route information element
+// and returns one or more viable candidates with the resulting bit offset.
+func (d *Decoder) decodeRouteInformationElementCandidates() ([]routeInformationCandidate, error) {
 	// FANSRouteInformation has 6 alternatives (0-5), 3 bits.
 	// 0: publicationIdentifier
 	// 1: latitudeLongitude
-	// 2: placeBearingPlaceBearing (2x place-bearing pairs)
+	// 2: Some aircraft appear to use this CHOICE value for compact route lat/lon points.
+	//    Treat it as an alternative route latitude/longitude encoding first.
 	// 3: placeBearingDistance
 	// 4: airwayIdentifier
 	// 5: trackDetail
 
 	choice, err := d.br.ReadConstrainedInt(0, 5)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
+	afterChoice := d.br.Offset()
 
 	switch choice {
 	case 0: // publicationIdentifier (SIZE 1..6).
-		length, err := d.br.ReadConstrainedInt(1, 6)
+		candidate, err := d.decodePublicationIdentifierCandidate(afterChoice)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
-		return d.decodeIA5String(length)
+		return []routeInformationCandidate{candidate}, nil
 	case 1: // latitudeLongitude.
+		_ = d.br.SetOffset(afterChoice)
 		lat, lon, err := d.decodeLatLon()
 		if err != nil {
-			return "", err
+			return nil, fmt.Errorf("unable to decode route latitude/longitude: %w", err)
 		}
-		return fmt.Sprintf("%.4f,%.4f", lat, lon), nil
-	case 2: // placeBearingPlaceBearing (complex, skip for now).
-		return "(place-bearing-place-bearing)", nil
+		return []routeInformationCandidate{{
+			element: RouteInformationElement{
+				Kind:     "latlon",
+				Position: &Position{Type: "latlon", Latitude: &lat, Longitude: &lon},
+			},
+			offset: d.br.Offset(),
+			score:  scoreRouteInformationElement(RouteInformationElement{Kind: "latlon", Position: &Position{Latitude: &lat, Longitude: &lon}}),
+		}}, nil
+	case 2: // placeBearingPlaceBearing.
+		_ = d.br.SetOffset(afterChoice)
+		return nil, fmt.Errorf("unsupported route information choice: place-bearing-place-bearing")
 	case 3: // placeBearingDistance.
 		pbd, err := d.decodePlaceBearingDistance()
 		if err != nil {
-			return "", err
+			return nil, err
 		}
-		return fmt.Sprintf("%s %03d/%d%s", pbd.FixName, *pbd.Bearing, *pbd.Distance, pbd.DistanceUnit), nil
+		position := &Position{
+			Type:         "place_bearing_distance",
+			Name:         pbd.FixName,
+			Bearing:      pbd.Bearing,
+			Distance:     pbd.Distance,
+			DistanceUnit: pbd.DistanceUnit,
+		}
+		if pbd.Latitude != nil && pbd.Longitude != nil {
+			position.Latitude = pbd.Latitude
+			position.Longitude = pbd.Longitude
+		}
+		return []routeInformationCandidate{{
+			element: RouteInformationElement{Kind: "place_bearing_distance", Position: position},
+			offset:  d.br.Offset(),
+			score:   5,
+		}}, nil
 	case 4: // airwayIdentifier.
-		return d.decodeAirwayIdentifier()
-	case 5: // trackDetail (complex, skip for now).
-		return "(track-detail)", nil
+		airway, err := d.decodeAirwayIdentifier()
+		if err != nil {
+			return nil, err
+		}
+		return []routeInformationCandidate{{
+			element: RouteInformationElement{Kind: "airway", Airway: airway},
+			offset:  d.br.Offset(),
+			score:   7,
+		}}, nil
+	case 5: // Some samples use this CHOICE value where an airway identifier is expected.
+		_ = d.br.SetOffset(afterChoice)
+		_ = d.br.SetOffset(afterChoice)
+		return nil, fmt.Errorf("unsupported route information choice: track-detail")
 	default:
-		return "", fmt.Errorf("unknown route element choice: %d", choice)
+		return nil, fmt.Errorf("unknown route element choice: %d", choice)
 	}
+}
+
+func (d *Decoder) decodePublicationIdentifierCandidate(startOffset int) (routeInformationCandidate, error) {
+	_ = d.br.SetOffset(startOffset)
+	hasLatLon, err := d.br.ReadBit()
+	if err != nil {
+		return routeInformationCandidate{}, err
+	}
+	name, err := d.decodeFixName()
+	if err != nil {
+		return routeInformationCandidate{}, err
+	}
+	position := &Position{Type: "published_identifier", Name: name}
+	if hasLatLon {
+		lat, lon, err := d.decodeLatLon()
+		if err != nil {
+			return routeInformationCandidate{}, err
+		}
+		position.Latitude = &lat
+		position.Longitude = &lon
+	}
+	return routeInformationCandidate{
+		element: RouteInformationElement{
+			Kind:     "published_identifier",
+			Position: position,
+		},
+		offset: d.br.Offset(),
+		score:  scoreRouteInformationElement(RouteInformationElement{Kind: "published_identifier", Position: position}),
+	}, nil
+}
+
+func (d *Decoder) decodeRouteInformationLatLonCompact() (float64, float64, error) {
+	latDeg, err := d.br.ReadConstrainedInt(0, 90)
+	if err != nil {
+		return 0, 0, err
+	}
+	latSouth, err := d.br.ReadBit()
+	if err != nil {
+		return 0, 0, err
+	}
+	lonDeg, err := d.br.ReadConstrainedInt(0, 180)
+	if err != nil {
+		return 0, 0, err
+	}
+	lonWest, err := d.br.ReadBit()
+	if err != nil {
+		return 0, 0, err
+	}
+
+	lat := float64(latDeg)
+	lon := float64(lonDeg)
+	if latSouth {
+		lat = -lat
+	}
+	if lonWest {
+		lon = -lon
+	}
+
+	return lat, lon, nil
+}
+
+func (d *Decoder) decodeRouteInformationLatLonCompactInterleaved() (float64, float64, error) {
+	latDeg, err := d.br.ReadConstrainedInt(0, 90)
+	if err != nil {
+		return 0, 0, err
+	}
+	latSouth, err := d.br.ReadBit()
+	if err != nil {
+		return 0, 0, err
+	}
+	lonWest, err := d.br.ReadBit()
+	if err != nil {
+		return 0, 0, err
+	}
+	lonDeg, err := d.br.ReadConstrainedInt(0, 180)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	lat := float64(latDeg)
+	lon := float64(lonDeg)
+	if latSouth {
+		lat = -lat
+	}
+	if lonWest {
+		lon = -lon
+	}
+
+	return lat, lon, nil
+}
+
+func (d *Decoder) decodeRouteInformationLatLonCompactInterleavedPadded() (float64, float64, error) {
+	lat, lon, err := d.decodeRouteInformationLatLonCompactInterleaved()
+	if err != nil {
+		return 0, 0, err
+	}
+	if _, err := d.br.ReadBits(5); err != nil {
+		return 0, 0, err
+	}
+	return lat, lon, nil
 }

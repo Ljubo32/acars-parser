@@ -25,6 +25,8 @@ python .\gui\acars_parser_gui.py
 
 The standalone viewer [gui/acars_viewer_fast_kv_map_v8.html](gui/acars_viewer_fast_kv_map_v8.html) can resolve named FPN and PWI route waypoints through [gui/Waypoints.txt](gui/Waypoints.txt), so those points can be drawn on the map even when the JSON only contains waypoint names.
 
+The viewer also supports filtering rows that have a Flight value and sorting the Summary / Details column by the amount of message content, which is useful for surfacing the densest ACARS messages first.
+
 If the viewer is opened via a local `file:` URL, some browsers block automatic loading of sibling files. In that case, use the `Load Waypoints` control in the viewer and select `gui/Waypoints.txt` manually.
 
 Notes:

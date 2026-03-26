@@ -18,6 +18,7 @@ var messageSCRRe = regexp.MustCompile(`^/ILNGE7X\.[A-Z0-9]+\.(?P<tail_flight>[A-
 type Result struct {
 	MsgID       int64  `json:"message_id"`
 	Timestamp   string `json:"timestamp"`
+	MsgType     string `json:"msg_type,omitempty"`
 	Tail        string `json:"tail,omitempty"`
 	Flight      string `json:"flight,omitempty"`
 	TakeOffDate string `json:"take_off_date,omitempty"`
@@ -64,6 +65,7 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 		return &Result{
 			MsgID:       int64(msg.ID),
 			Timestamp:   msg.Timestamp,
+			MsgType:     "ILNGE",
 			Tail:        tail,
 			Flight:      flight,
 			TakeOffDate: formatDateYYMMDD(captures["date"]),
@@ -88,6 +90,7 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 		return &Result{
 			MsgID:       int64(msg.ID),
 			Timestamp:   msg.Timestamp,
+			MsgType:     "ILNGE",
 			Tail:        tail,
 			Flight:      flight,
 			TakeOffDate: formatDateYYMMDD(captures["date"]),
@@ -112,6 +115,7 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 		return &Result{
 			MsgID:       int64(msg.ID),
 			Timestamp:   msg.Timestamp,
+			MsgType:     "ILNGE",
 			Tail:        tail,
 			Flight:      flight,
 			TakeOffDate: formatDateDDMMYY(captures["date"]),
@@ -135,6 +139,7 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 	return &Result{
 		MsgID:       int64(msg.ID),
 		Timestamp:   msg.Timestamp,
+		MsgType:     "ILNGE",
 		Tail:        captures["tail"],
 		Flight:      captures["flight"],
 		TakeOffDate: formatDateWithSlashes(captures["date"]),

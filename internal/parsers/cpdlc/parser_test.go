@@ -3,6 +3,7 @@ package cpdlc
 import (
 	"encoding/hex"
 	"math"
+	"strings"
 	"testing"
 
 	"acars_parser/internal/acars"
@@ -19,6 +20,11 @@ func TestQuickCheck(t *testing.T) {
 		{
 			name:      "CPDLC message",
 			text:      "/PIKCPYA.AT1.F-GSQC214823E24092E7",
+			wantMatch: true,
+		},
+		{
+			name:      "CPDLC message without trailing IMI separator",
+			text:      "/OAKODYA.AT1RPC87862616402A49AACE830A64541199B960822558A82A4F41529418D1A4C35882945A2827CE411A4CC8A03B1E",
 			wantMatch: true,
 		},
 		{
@@ -405,6 +411,178 @@ func TestParseUplinkContactWithFreeText(t *testing.T) {
 	}
 }
 
+func TestParseUplinkContactHFWithFreeTextRegression(t *testing.T) {
+	parser := &Parser{}
+
+	msg := &acars.Message{
+		ID:        1,
+		Label:     "AA",
+		Text:      "/MRUCAYA.AT1.ZS-SXDA286F95D991C968D99B366F146C152354E2C39F3A241A5650488C823528B46AC59D0ECA06AD99B405FFF",
+		Timestamp: "2026-03-20T00:00:00Z",
+	}
+
+	result := parser.Parse(msg)
+	if result == nil {
+		t.Fatal("Parse() returned nil")
+	}
+
+	r := result.(*Result)
+	if r.Error != "" {
+		t.Fatalf("unexpected parse error: %s", r.Error)
+	}
+	if r.Header == nil || r.Header.MsgID != 5 {
+		t.Fatalf("unexpected header: %+v", r.Header)
+	}
+	if r.Header.Timestamp == nil || r.Header.Timestamp.Hours != 1 || r.Header.Timestamp.Minutes != 47 || r.Header.Timestamp.Seconds == nil || *r.Header.Timestamp.Seconds != 37 {
+		t.Fatalf("unexpected header timestamp: %+v", r.Header.Timestamp)
+	}
+	if len(r.Elements) != 2 {
+		t.Fatalf("expected 2 elements, got %d", len(r.Elements))
+	}
+
+	first := r.Elements[0]
+	if first.ID != 118 {
+		t.Fatalf("expected first element 118, got %d", first.ID)
+	}
+	data, ok := first.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected first element compound data, got %T", first.Data)
+	}
+	position, ok := data["position"].(*Position)
+	if !ok || position == nil || position.Latitude == nil || position.Longitude == nil {
+		t.Fatalf("unexpected position: %#v", data["position"])
+	}
+	if math.Abs(*position.Latitude-(-35.0)) > 0.0001 || math.Abs(*position.Longitude-75.0) > 0.0001 {
+		t.Fatalf("unexpected position lat/lon: %v,%v", *position.Latitude, *position.Longitude)
+	}
+	unit, ok := data["unit"].(string)
+	if !ok || unit != "YMMM" {
+		t.Fatalf("unexpected unit: %#v", data["unit"])
+	}
+	unitType, ok := data["unit_type"].(string)
+	if !ok || unitType != "control" {
+		t.Fatalf("unexpected unit_type: %#v", data["unit_type"])
+	}
+	freq, ok := data["frequency"].(*Frequency)
+	if !ok || freq == nil || freq.Type != "hf" || math.Abs(freq.Value-13306.0) > 0.0001 {
+		t.Fatalf("unexpected frequency: %#v", data["frequency"])
+	}
+
+	second := r.Elements[1]
+	if second.ID != 169 {
+		t.Fatalf("expected second element 169, got %d", second.ID)
+	}
+	freeText, ok := second.Data.(*FreeText)
+	if !ok || freeText == nil || freeText.Text != "SECONDARY HF FREQUENCY 5634" {
+		t.Fatalf("unexpected freetext: %#v", second.Data)
+	}
+	if r.FormattedText != "SECONDARY HF FREQUENCY 5634" {
+		t.Fatalf("unexpected formatted text: %q", r.FormattedText)
+	}
+}
+
+func TestParseUplinkErrorInformationWithFreeTextRegression(t *testing.T) {
+	parser := &Parser{}
+
+	msg := &acars.Message{
+		ID:        1,
+		Label:     "AA",
+		Text:      "/MGQCAYA.AT1.A6-EBRE0827C849F0152530E844990D04E9F51041AD064CC830A6454106A20A9224D341524CD8AB6AD38A82B4F930E28C406",
+		Timestamp: "2026-03-21T00:00:00Z",
+	}
+
+	result := parser.Parse(msg)
+	if result == nil {
+		t.Fatal("Parse() returned nil")
+	}
+
+	r := result.(*Result)
+	if r.Error != "" {
+		t.Fatalf("unexpected parse error: %s", r.Error)
+	}
+	if r.Header == nil || r.Header.MsgID != 1 {
+		t.Fatalf("unexpected header: %+v", r.Header)
+	}
+	if r.Header.MsgRef == nil || *r.Header.MsgRef != 1 {
+		t.Fatalf("unexpected msg ref: %+v", r.Header)
+	}
+	if r.Header.Timestamp == nil || r.Header.Timestamp.Hours != 7 || r.Header.Timestamp.Minutes != 50 || r.Header.Timestamp.Seconds == nil || *r.Header.Timestamp.Seconds != 4 {
+		t.Fatalf("unexpected header timestamp: %+v", r.Header.Timestamp)
+	}
+	if len(r.Elements) != 2 {
+		t.Fatalf("expected 2 elements, got %d", len(r.Elements))
+	}
+
+	first := r.Elements[0]
+	if first.ID != 159 {
+		t.Fatalf("expected first element 159, got %d", first.ID)
+	}
+	errorInfo, ok := first.Data.(*ErrorInfo)
+	if !ok || errorInfo == nil {
+		t.Fatalf("unexpected first element data: %#v", first.Data)
+	}
+	if errorInfo.Code != 0 || errorInfo.Desc != "applicationError" {
+		t.Fatalf("unexpected error info: %#v", errorInfo)
+	}
+
+	second := r.Elements[1]
+	if second.ID != 169 {
+		t.Fatalf("expected second element 169, got %d", second.ID)
+	}
+	freeText, ok := second.Data.(*FreeText)
+	if !ok || freeText == nil || freeText.Text != "CPDLC NOT AVAILABLE AT THIS TIME-USE VOICE" {
+		t.Fatalf("unexpected freetext: %#v", second.Data)
+	}
+}
+
+func TestParseUplinkFreeTextDotlessAT1Regression(t *testing.T) {
+	parser := &Parser{}
+
+	msg := &acars.Message{
+		ID:        1,
+		Label:     "AA",
+		Text:      "/OAKODYA.AT1RPC87862616402A49AACE830A64541199B960822558A82A4F41529418D1A4C35882945A2827CE411A4CC8A03B1E",
+		Timestamp: "2026-03-21T00:00:00Z",
+	}
+
+	result := parser.Parse(msg)
+	if result == nil {
+		t.Fatal("Parse() returned nil")
+	}
+
+	r := result.(*Result)
+	if r.Error != "" {
+		t.Fatalf("unexpected parse error: %s", r.Error)
+	}
+	if r.MessageType != "cpdlc" {
+		t.Fatalf("MessageType = %q, want %q", r.MessageType, "cpdlc")
+	}
+	if r.Registration != "RPC8786" {
+		t.Fatalf("Registration = %q, want %q", r.Registration, "RPC8786")
+	}
+	if r.Header == nil || r.Header.MsgID != 12 {
+		t.Fatalf("unexpected header: %+v", r.Header)
+	}
+	if r.Header.MsgRef != nil {
+		t.Fatalf("unexpected msg ref: %+v", r.Header)
+	}
+	if r.Header.Timestamp == nil || r.Header.Timestamp.Hours != 5 || r.Header.Timestamp.Minutes != 36 || r.Header.Timestamp.Seconds == nil || *r.Header.Timestamp.Seconds != 0 {
+		t.Fatalf("unexpected header timestamp: %+v", r.Header.Timestamp)
+	}
+	if len(r.Elements) != 1 {
+		t.Fatalf("expected 1 element, got %d", len(r.Elements))
+	}
+
+	first := r.Elements[0]
+	if first.ID != 169 {
+		t.Fatalf("expected first element 169, got %d", first.ID)
+	}
+	freeText, ok := first.Data.(*FreeText)
+	if !ok || freeText == nil || freeText.Text != "UNABLE F390 DUE TO TRAFFIC, REQ ON FILE" {
+		t.Fatalf("unexpected freetext: %#v", first.Data)
+	}
+}
+
 func TestParseUplinkSquawkBeaconCode(t *testing.T) {
 	parser := &Parser{}
 
@@ -623,7 +801,106 @@ func TestParseUplinkMaintainAndClearedViaRoute(t *testing.T) {
 	if !ok || routeClearance == nil {
 		t.Fatalf("unexpected route clearance: %#v", data["route_clearance"])
 	}
-	if len(routeClearance.RouteInformation) != 1 || routeClearance.RouteInformation[0] != "UG862" {
+	if len(routeClearance.RouteInformation) != 1 || routeClearance.RouteInformation[0].Kind != "airway" || routeClearance.RouteInformation[0].Airway != "UG862" {
 		t.Fatalf("unexpected route information: %#v", routeClearance.RouteInformation)
+	}
+}
+
+func TestParseUplinkRouteClearanceWithCoordinateRouteInformationRegression(t *testing.T) {
+	parser := &Parser{}
+
+	msg := &acars.Message{
+		ID:        1,
+		Label:     "AA",
+		Text:      "/MELCAYA.AT1.A6-EOEA5B3A3EA482945A53EAD48A82A4F41420D283326459882AC18AE1854410A2C8933A209EACCD9B30021243E621169A4122C7834A7828B4E804AD266D5A6129D585566849D3E3C9A11D664DDC8483320D89E066CC07F89",
+		Timestamp: "2026-03-21T00:00:00Z",
+	}
+
+	result := parser.Parse(msg)
+	if result == nil {
+		t.Fatal("Parse() returned nil")
+	}
+
+	r := result.(*Result)
+	if r.Error != "" {
+		t.Fatalf("unexpected parse error: %s", r.Error)
+	}
+	if r.Header == nil || r.Header.MsgID != 11 {
+		t.Fatalf("unexpected header: %+v", r.Header)
+	}
+	if r.Header.Timestamp == nil || r.Header.Timestamp.Hours != 12 || r.Header.Timestamp.Minutes != 58 || r.Header.Timestamp.Seconds == nil || *r.Header.Timestamp.Seconds != 15 {
+		t.Fatalf("unexpected header timestamp: %+v", r.Header.Timestamp)
+	}
+	if len(r.Elements) != 2 {
+		t.Fatalf("expected 2 elements, got %d", len(r.Elements))
+	}
+
+	first := r.Elements[0]
+	if first.ID != 169 {
+		t.Fatalf("expected first element 169, got %d", first.ID)
+	}
+	freeText, ok := first.Data.(*FreeText)
+	if !ok || freeText == nil || freeText.Text != "REROUTE TO PARALLEL UAE80T BEHIND" {
+		t.Fatalf("unexpected freetext: %#v", first.Data)
+	}
+
+	second := r.Elements[1]
+	if second.ID != 79 {
+		t.Fatalf("expected second element 79, got %d", second.ID)
+	}
+	data, ok := second.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected second element map data, got %T", second.Data)
+	}
+	position, ok := data["position"].(*Position)
+	if !ok || position == nil || position.Name != "YMML" {
+		t.Fatalf("unexpected position: %#v", data["position"])
+	}
+	routeClearance, ok := data["route_clearance"].(*RouteClearance)
+	if !ok || routeClearance == nil {
+		t.Fatalf("unexpected route clearance: %#v", data["route_clearance"])
+	}
+	if len(routeClearance.RouteInformation) != 10 {
+		t.Fatalf("len(route information) = %d, want 10; got %#v", len(routeClearance.RouteInformation), routeClearance.RouteInformation)
+	}
+
+	firstRoute := routeClearance.RouteInformation[0]
+	if firstRoute.Kind != "latlon" || firstRoute.Position == nil || firstRoute.Position.Latitude == nil || firstRoute.Position.Longitude == nil {
+		t.Fatalf("unexpected first route element: %#v", firstRoute)
+	}
+	if math.Abs(*firstRoute.Position.Latitude-(-15.0)) > 0.0001 || math.Abs(*firstRoute.Position.Longitude-98.0) > 0.0001 {
+		t.Fatalf("unexpected first route lat/lon: %v,%v", *firstRoute.Position.Latitude, *firstRoute.Position.Longitude)
+	}
+
+	secondRoute := routeClearance.RouteInformation[1]
+	if secondRoute.Kind != "latlon" || secondRoute.Position == nil || secondRoute.Position.Latitude == nil || secondRoute.Position.Longitude == nil {
+		t.Fatalf("unexpected second route element: %#v", secondRoute)
+	}
+	if math.Abs(*secondRoute.Position.Latitude-(-22.0)) > 0.0001 || math.Abs(*secondRoute.Position.Longitude-105.0) > 0.0001 {
+		t.Fatalf("unexpected second route lat/lon: %v,%v", *secondRoute.Position.Latitude, *secondRoute.Position.Longitude)
+	}
+
+	wantPublished := []string{"EGARO", "ESP", "VIMUS", "SUBUM", "NOGIP", "ALAXO", "ML"}
+	gotPublished := []string{}
+	for _, routeInfo := range routeClearance.RouteInformation {
+		if routeInfo.Kind == "published_identifier" && routeInfo.Position != nil {
+			gotPublished = append(gotPublished, routeInfo.Position.Name)
+		}
+	}
+	if strings.Join(gotPublished, ",") != strings.Join(wantPublished, ",") {
+		t.Fatalf("unexpected published identifiers: got %v want %v", gotPublished, wantPublished)
+	}
+
+	airwayCount := 0
+	for _, routeInfo := range routeClearance.RouteInformation {
+		if routeInfo.Kind == "airway" {
+			airwayCount++
+			if routeInfo.Airway != "V279" {
+				t.Fatalf("unexpected airway: %#v", routeInfo)
+			}
+		}
+	}
+	if airwayCount != 1 {
+		t.Fatalf("airwayCount = %d, want 1; route=%#v", airwayCount, routeClearance.RouteInformation)
 	}
 }

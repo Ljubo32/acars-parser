@@ -70,6 +70,15 @@ func ExtractAirports(text string, tokens []string) (origin, destination string) 
 	// Pattern 4: Look for "XXXX ... XXXX" where first is origin and last is destination.
 	// Common in PDC route lines like "KPHL DITCH LUIGI HNNAH CYUL".
 	allICAO := FindAllValidICAO(upperText)
+	if destination != "" {
+		for _, code := range allICAO {
+			if code != destination {
+				origin = code
+				break
+			}
+		}
+		return
+	}
 	if len(allICAO) >= 2 {
 		origin = allICAO[0]
 		// Use the LAST valid ICAO as destination (more reliable for route lines).

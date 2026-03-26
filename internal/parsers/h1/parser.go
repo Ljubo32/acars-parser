@@ -42,6 +42,7 @@ type RouteWaypoint struct {
 type FPNResult struct {
 	MsgID               int64           `json:"message_id"`
 	Timestamp           string          `json:"timestamp"`
+	MsgType             string          `json:"msg_type,omitempty"`
 	Tail                string          `json:"tail,omitempty"`
 	FlightNum           string          `json:"flight_num,omitempty"`
 	Origin              string          `json:"origin"`
@@ -101,6 +102,7 @@ func (p *FPNParser) Parse(msg *acars.Message) registry.Result {
 	fp := &FPNResult{
 		MsgID:               int64(msg.ID),
 		Timestamp:           msg.Timestamp,
+		MsgType:             "FPN",
 		Tail:                msg.Tail,
 		Origin:              origin,
 		Destination:         dest,
@@ -130,7 +132,7 @@ func (p *FPNParser) Parse(msg *acars.Message) registry.Result {
 	}
 
 	// Detect truncated messages.
-	fp.Truncated = detectTruncation(msg.Text, fp.Waypoints, route)
+	fp.Truncated = detectTruncation(msg.Text, route)
 
 	return fp
 }
@@ -275,7 +277,7 @@ func splitProcedureTransition(s string) (procedure, transition string) {
 // the CRC checksum. For messages with /WD section, the last 4 hex characters are
 // the CRC which should verify to 0x1D0F when appended as bytes.
 // Returns true if the message is truncated/corrupt, false if valid or unknown.
-func detectTruncation(text string, waypoints []RouteWaypoint, route string) bool {
+func detectTruncation(text string, route string) bool {
 	// Check for multi-part message markers without proper termination.
 	if strings.Contains(text, "#M1") && !strings.Contains(text, "#MD") {
 		return true
@@ -481,6 +483,7 @@ func parseWaypointWithCoords(segment string) *RouteWaypoint {
 type H1PosResult struct {
 	MsgID           int64   `json:"message_id"`
 	Timestamp       string  `json:"timestamp"`
+	MsgType         string  `json:"msg_type,omitempty"`
 	Tail            string  `json:"tail,omitempty"`
 	Latitude        float64 `json:"latitude"`
 	Longitude       float64 `json:"longitude"`
@@ -543,6 +546,7 @@ func (p *H1PosParser) Parse(msg *acars.Message) registry.Result {
 	result := &H1PosResult{
 		MsgID:           int64(msg.ID),
 		Timestamp:       msg.Timestamp,
+		MsgType:         "POS",
 		Tail:            msg.Tail,
 		Latitude:        lat,
 		Longitude:       lon,
@@ -621,6 +625,7 @@ func parseIntField(s string) (int, error) {
 type PWIResult struct {
 	MsgID        int64            `json:"message_id"`
 	Timestamp    string           `json:"timestamp"`
+	MsgType      string           `json:"msg_type,omitempty"`
 	Tail         string           `json:"tail,omitempty"`
 	ReportTime   string           `json:"report_time,omitempty"`
 	ClimbWinds   []AltitudeWind   `json:"climb_winds,omitempty"`
@@ -646,10 +651,12 @@ type RouteWindLayer struct {
 
 // WaypointWind represents wind and temperature at a waypoint.
 type WaypointWind struct {
-	Waypoint    string `json:"waypoint"`
-	WindDir     int    `json:"wind_dir"`
-	WindSpeed   int    `json:"wind_speed"`
-	Temperature int    `json:"temperature,omitempty"`
+	Waypoint    string  `json:"waypoint"`
+	Latitude    float64 `json:"latitude,omitempty"`
+	Longitude   float64 `json:"longitude,omitempty"`
+	WindDir     int     `json:"wind_dir"`
+	WindSpeed   int     `json:"wind_speed"`
+	Temperature int     `json:"temperature,omitempty"`
 }
 
 // PWIParser parses H1 PWI predicted wind messages.
@@ -684,6 +691,7 @@ func (p *PWIParser) Parse(msg *acars.Message) registry.Result {
 	report := &PWIResult{
 		MsgID:     int64(msg.ID),
 		Timestamp: msg.Timestamp,
+		MsgType:   "PWI",
 		Tail:      msg.Tail,
 	}
 
@@ -762,14 +770,18 @@ func parseAltitudeWinds(data string) []AltitudeWind {
 // - "410,EHGG,348048,410M69.SONEB,352048,410M69.OLDOD,..."
 // - "300,SPI,316078,300M49.BAYLI,315080,300M49...."
 func parseRouteWindLayer(data string) *RouteWindLayer {
-	parts := strings.Split(data, ",")
-	if len(parts) < 2 {
+	flPart, remainder, ok := strings.Cut(data, ",")
+	if !ok {
 		return nil
 	}
 
 	var fl int
-	_, _ = fmt.Sscanf(parts[0], "%d", &fl)
+	_, _ = fmt.Sscanf(flPart, "%d", &fl)
 	if fl == 0 {
+		return nil
+	}
+	remainder = strings.TrimSpace(remainder)
+	if remainder == "" {
 		return nil
 	}
 
@@ -777,80 +789,31 @@ func parseRouteWindLayer(data string) *RouteWindLayer {
 		FlightLevel: fl,
 	}
 
-	// Parse waypoint entries. Format: WAYPOINT,WINDDATA,TEMPDATA.NEXTWAYPOINT,...
-	// The period separates temperature from next waypoint.
-	i := 1
-	for i < len(parts) {
-		// Get waypoint name (might have trailing period or be after one).
-		wpName := strings.TrimSpace(parts[i])
-		wpName = strings.TrimSuffix(wpName, ".") // Remove trailing period if present.
-
-		// Check if this looks like a waypoint (letters only, 2-5 chars).
-		if len(wpName) < 2 || len(wpName) > 6 {
-			i++
+	entries := strings.Split(remainder, ".")
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
 			continue
 		}
-		isWaypoint := true
-		for _, c := range wpName {
-			if c < 'A' || c > 'Z' {
-				isWaypoint = false
-				break
-			}
+
+		parts := strings.Split(entry, ",")
+		if len(parts) < 2 {
+			continue
 		}
-		if !isWaypoint {
-			i++
+
+		wpName := strings.TrimSpace(parts[0])
+		if !isPWIWaypoint(wpName) {
 			continue
 		}
 
 		ww := &WaypointWind{Waypoint: wpName}
-
-		// Next part should be wind data (6 digits: DDDSPD).
-		if i+1 < len(parts) {
-			windData := parts[i+1]
-			if len(windData) >= 6 {
-				_, _ = fmt.Sscanf(windData[:3], "%d", &ww.WindDir)
-				_, _ = fmt.Sscanf(windData[3:6], "%d", &ww.WindSpeed)
-			}
+		if looksLikeCoordinateWaypoint(wpName) {
+			ww.Latitude, ww.Longitude = parseWaypointCoords(wpName)
 		}
 
-		// Next part should be temp data, possibly with next waypoint after period.
-		if i+2 < len(parts) {
-			tempData := parts[i+2]
-			// Split on period to separate temp from next waypoint.
-			if dotIdx := strings.Index(tempData, "."); dotIdx >= 0 {
-				tempPart := tempData[:dotIdx]
-				nextWpt := tempData[dotIdx+1:]
-
-				// Parse temperature (e.g., "300M49" or "410M69").
-				if mIdx := strings.Index(tempPart, "M"); mIdx >= 0 {
-					var temp int
-					_, _ = fmt.Sscanf(tempPart[mIdx+1:], "%d", &temp)
-					ww.Temperature = -temp
-				} else if pIdx := strings.Index(tempPart, "P"); pIdx >= 0 {
-					_, _ = fmt.Sscanf(tempPart[pIdx+1:], "%d", &ww.Temperature)
-				}
-
-				// If there's a next waypoint, insert it back for the next iteration.
-				if nextWpt != "" && nextWpt != "." {
-					// Modify parts to include the next waypoint.
-					parts[i+2] = nextWpt
-					i += 2 // Move to the next waypoint position.
-				} else {
-					i += 3
-				}
-			} else {
-				// No period, just temperature data.
-				if mIdx := strings.Index(tempData, "M"); mIdx >= 0 {
-					var temp int
-					_, _ = fmt.Sscanf(tempData[mIdx+1:], "%d", &temp)
-					ww.Temperature = -temp
-				} else if pIdx := strings.Index(tempData, "P"); pIdx >= 0 {
-					_, _ = fmt.Sscanf(tempData[pIdx+1:], "%d", &ww.Temperature)
-				}
-				i += 3
-			}
-		} else {
-			i += 3
+		parsePWIWindData(parts[1], ww)
+		if len(parts) >= 3 {
+			parsePWITemperature(parts[2], ww)
 		}
 
 		layer.Waypoints = append(layer.Waypoints, *ww)
@@ -861,4 +824,76 @@ func parseRouteWindLayer(data string) *RouteWindLayer {
 	}
 
 	return layer
+}
+
+func isPWIWaypoint(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	if looksLikeCoordinateWaypoint(value) {
+		return true
+	}
+	if len(value) < 2 || len(value) > 16 {
+		return false
+	}
+	for _, c := range value {
+		if (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func looksLikeCoordinateWaypoint(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) != 13 {
+		return false
+	}
+	if (value[0] != 'N' && value[0] != 'S') || (value[6] != 'E' && value[6] != 'W') {
+		return false
+	}
+	for idx, c := range value {
+		if idx == 0 || idx == 6 {
+			continue
+		}
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func parsePWIWindData(value string, waypoint *WaypointWind) {
+	value = strings.TrimSpace(value)
+	if len(value) < 5 {
+		return
+	}
+	if len(value) > 6 {
+		value = value[:6]
+	}
+	if len(value) == 5 {
+		_, _ = fmt.Sscanf(value[:3], "%d", &waypoint.WindDir)
+		_, _ = fmt.Sscanf(value[3:], "%d", &waypoint.WindSpeed)
+		return
+	}
+	_, _ = fmt.Sscanf(value[:3], "%d", &waypoint.WindDir)
+	_, _ = fmt.Sscanf(value[3:6], "%d", &waypoint.WindSpeed)
+}
+
+func parsePWITemperature(value string, waypoint *WaypointWind) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	if mIdx := strings.Index(value, "M"); mIdx >= 0 {
+		var temp int
+		_, _ = fmt.Sscanf(value[mIdx+1:], "%d", &temp)
+		waypoint.Temperature = -temp
+		return
+	}
+	if pIdx := strings.Index(value, "P"); pIdx >= 0 {
+		_, _ = fmt.Sscanf(value[pIdx+1:], "%d", &waypoint.Temperature)
+	}
 }

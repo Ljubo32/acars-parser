@@ -15,22 +15,23 @@ import (
 type Result struct {
 	MsgID        int64  `json:"message_id"`
 	Timestamp    string `json:"timestamp"`
+	MsgType      string `json:"msg_type,omitempty"`
 	Tail         string `json:"tail,omitempty"`
 	Flight       string `json:"flight,omitempty"`
 	Origin       string `json:"origin,omitempty"`
 	Destination  string `json:"destination,omitempty"`
 	AircraftType string `json:"aircraft_type,omitempty"`
-	ZFW          int    `json:"zfw,omitempty"`          // Zero Fuel Weight
-	TOW          int    `json:"tow,omitempty"`          // Take Off Weight
-	LAW          int    `json:"law,omitempty"`          // Landing Weight
-	TOF          int    `json:"tof,omitempty"`          // Take Off Fuel
-	PAX          int    `json:"pax,omitempty"`          // Passenger count
-	Crew         string `json:"crew,omitempty"`         // Crew configuration
-	Trim         string `json:"trim,omitempty"`         // Stabiliser trim
-	MACZFW       string `json:"mac_zfw,omitempty"`      // MAC at ZFW
-	MACTOW       string `json:"mac_tow,omitempty"`      // MAC at TOW
-	Cargo        int    `json:"cargo,omitempty"`        // Cargo weight
-	Edition      string `json:"edition,omitempty"`      // Loadsheet edition
+	ZFW          int    `json:"zfw,omitempty"`     // Zero Fuel Weight
+	TOW          int    `json:"tow,omitempty"`     // Take Off Weight
+	LAW          int    `json:"law,omitempty"`     // Landing Weight
+	TOF          int    `json:"tof,omitempty"`     // Take Off Fuel
+	PAX          int    `json:"pax,omitempty"`     // Passenger count
+	Crew         string `json:"crew,omitempty"`    // Crew configuration
+	Trim         string `json:"trim,omitempty"`    // Stabiliser trim
+	MACZFW       string `json:"mac_zfw,omitempty"` // MAC at ZFW
+	MACTOW       string `json:"mac_tow,omitempty"` // MAC at TOW
+	Cargo        int    `json:"cargo,omitempty"`   // Cargo weight
+	Edition      string `json:"edition,omitempty"` // Loadsheet edition
 }
 
 func (r *Result) Type() string     { return "loadsheet" }
@@ -44,13 +45,13 @@ func init() {
 }
 
 func (p *Parser) Name() string     { return "loadsheet" }
-func (p *Parser) Labels() []string { return []string{"C1"} }
+func (p *Parser) Labels() []string { return nil }
 func (p *Parser) Priority() int    { return 60 } // Higher priority than weather.
 
 // QuickCheck looks for loadsheet keywords.
 func (p *Parser) QuickCheck(text string) bool {
-	upper := strings.ToUpper(text)
-	return strings.Contains(upper, "LOADSHEET")
+	normalised := normaliseLoadsheetText(text)
+	return strings.Contains(normalised, "LOADSHEET")
 }
 
 // Pattern matchers.
@@ -101,6 +102,7 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 	result := &Result{
 		MsgID:     int64(msg.ID),
 		Timestamp: msg.Timestamp,
+		MsgType:   "LOADSHEET",
 		Tail:      msg.Tail,
 	}
 
@@ -174,4 +176,9 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 	}
 
 	return result
+}
+
+func normaliseLoadsheetText(text string) string {
+	upper := strings.ToUpper(text)
+	return strings.Join(strings.Fields(upper), "")
 }

@@ -33,6 +33,7 @@ func TestREP301Parse(t *testing.T) {
 	}
 
 	assertStringEqual(t, "timestamp", result.Timestamp, "2026-03-14T07:57:30Z")
+	assertStringEqual(t, "msg_type", result.MsgType, "REP301")
 	assertStringEqual(t, "tail", result.Tail, ".HB-JLR")
 	assertStringEqual(t, "route", result.Route, "LGAV-LSGG")
 	assertStringEqual(t, "origin", result.Origin, "LGAV")
@@ -143,6 +144,7 @@ func TestREP301ParseRealWorldSamples(t *testing.T) {
 				t.Fatalf("Parse() returned %T, want *Result", parsed)
 			}
 
+			assertStringEqual(t, "msg_type", result.MsgType, "REP301")
 			assertStringEqual(t, "tail", result.Tail, test.tail)
 			assertStringEqual(t, "route", result.Route, test.wantRoute)
 			assertStringEqual(t, "origin", result.Origin, test.wantOrigin)

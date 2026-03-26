@@ -109,6 +109,7 @@ func TestFST01FixedFormat(t *testing.T) {
 				t.Fatalf("Expected *Result, got %T", res)
 			}
 
+			assertStringEqual(t, "msg_type", result.MsgType, "FST")
 			assertStringEqual(t, "origin", result.Origin, tt.origin)
 			assertStringEqual(t, "destination", result.Destination, tt.dest)
 			assertStringEqual(t, "route", result.Route, tt.route)
@@ -136,6 +137,7 @@ func TestFSTLegacyFormatStillParses(t *testing.T) {
 		t.Fatalf("Expected *Result, got %T", res)
 	}
 
+	assertStringEqual(t, "msg_type", result.MsgType, "FST")
 	assertStringEqual(t, "origin", result.Origin, "EGLC")
 	assertStringEqual(t, "destination", result.Destination, "EIDW")
 	assertStringEqual(t, "route", result.Route, "EGLC-EIDW")
@@ -162,6 +164,7 @@ func TestFSTJSONHidesRedundantFields(t *testing.T) {
 		t.Fatalf("Unmarshal failed: %v", err)
 	}
 
+	assertMapHasKey(t, got, "msg_type")
 	assertMapHasKey(t, got, "route")
 	assertMapHasKey(t, got, "ground_speed_kts")
 	assertMapHasKey(t, got, "ground_speed_kmh")

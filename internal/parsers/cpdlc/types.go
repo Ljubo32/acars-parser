@@ -1,6 +1,9 @@
 package cpdlc
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // MessageDirection indicates whether the message is uplink (ground to air) or downlink (air to ground).
 type MessageDirection int
@@ -135,16 +138,33 @@ type PlaceBearingDistance struct {
 
 // RouteClearance represents a route clearance with departure/arrival information.
 type RouteClearance struct {
-	AirportDeparture    string         `json:"airport_departure,omitempty"`
-	AirportDestination  string         `json:"airport_destination,omitempty"`
-	RunwayDeparture     *Runway        `json:"runway_departure,omitempty"`
-	ProcedureDeparture  *ProcedureName `json:"procedure_departure,omitempty"`
-	RunwayArrival       *Runway        `json:"runway_arrival,omitempty"`
-	ProcedureApproach   *ProcedureName `json:"procedure_approach,omitempty"`
-	ProcedureArrival    *ProcedureName `json:"procedure_arrival,omitempty"`
-	AirwayIntercept     string         `json:"airway_intercept,omitempty"`
-	RouteInformation    []string       `json:"route_information,omitempty"`
-	RouteInfoAdditional string         `json:"route_info_additional,omitempty"`
+	AirportDeparture    string                    `json:"airport_departure,omitempty"`
+	AirportDestination  string                    `json:"airport_destination,omitempty"`
+	RunwayDeparture     *Runway                   `json:"runway_departure,omitempty"`
+	ProcedureDeparture  *ProcedureName            `json:"procedure_departure,omitempty"`
+	RunwayArrival       *Runway                   `json:"runway_arrival,omitempty"`
+	ProcedureApproach   *ProcedureName            `json:"procedure_approach,omitempty"`
+	ProcedureArrival    *ProcedureName            `json:"procedure_arrival,omitempty"`
+	AirwayIntercept     string                    `json:"airway_intercept,omitempty"`
+	RouteInformation    []RouteInformationElement `json:"route_information,omitempty"`
+	RouteInfoAdditional string                    `json:"route_info_additional,omitempty"`
+}
+
+type RouteInformationElement struct {
+	Kind     string    `json:"kind"`
+	Position *Position `json:"position,omitempty"`
+	Airway   string    `json:"airway,omitempty"`
+	Text     string    `json:"text,omitempty"`
+}
+
+func (r RouteInformationElement) String() string {
+	if r.Position != nil {
+		return r.Position.String()
+	}
+	if r.Airway != "" {
+		return r.Airway
+	}
+	return r.Text
 }
 
 func (r *RouteClearance) String() string {
@@ -167,10 +187,21 @@ func (r *RouteClearance) String() string {
 	if r.AirwayIntercept != "" {
 		parts = append(parts, "AWY:"+r.AirwayIntercept)
 	}
+	if len(r.RouteInformation) > 0 {
+		routeParts := make([]string, 0, len(r.RouteInformation))
+		for _, routeInfo := range r.RouteInformation {
+			if text := routeInfo.String(); text != "" {
+				routeParts = append(routeParts, text)
+			}
+		}
+		if len(routeParts) > 0 {
+			parts = append(parts, "ROUTE:"+strings.Join(routeParts, " "))
+		}
+	}
 	if len(parts) == 0 {
 		return "(route clearance)"
 	}
-	return fmt.Sprintf("%v", parts)
+	return strings.Join(parts, " ")
 }
 
 // Runway represents a runway designation.

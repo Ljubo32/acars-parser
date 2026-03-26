@@ -13,10 +13,11 @@ import (
 type Result struct {
 	MsgID      int64  `json:"message_id"`
 	Timestamp  string `json:"timestamp"`
+	MsgType    string `json:"msg_type,omitempty"`
 	Tail       string `json:"tail,omitempty"`
 	Gate       string `json:"gate,omitempty"`
-	PPOS       string `json:"ppos,omitempty"`       // Parking position.
-	BagBelt    string `json:"bag_belt,omitempty"`   // Baggage belt.
+	PPOS       string `json:"ppos,omitempty"`     // Parking position.
+	BagBelt    string `json:"bag_belt,omitempty"` // Baggage belt.
 	NextFlight string `json:"next_flight,omitempty"`
 	NextRoute  string `json:"next_route,omitempty"`
 }
@@ -70,6 +71,7 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 	result := &Result{
 		MsgID:     int64(msg.ID),
 		Timestamp: msg.Timestamp,
+		MsgType:   "GATEASSIGN",
 		Tail:      msg.Tail,
 	}
 

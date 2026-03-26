@@ -59,6 +59,7 @@ type WindPoint struct {
 type Result struct {
 	MsgID           int64       `json:"message_id"`
 	Timestamp       string      `json:"timestamp"`
+	MsgType         string      `json:"msg_type,omitempty"`
 	Tail            string      `json:"tail,omitempty"`
 	Phase           string      `json:"phase,omitempty"` // 02A climb/descend, 02E cruise
 	Day             int         `json:"day,omitempty"`   // only for 02E (2-digit day)
@@ -118,6 +119,7 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 	result := &Result{
 		MsgID:           int64(msg.ID),
 		Timestamp:       msg.Timestamp,
+		MsgType:         "H2WIND",
 		Tail:            msg.Tail,
 		Origin:          match.Captures["origin"],
 		Destination:     match.Captures["dest"],

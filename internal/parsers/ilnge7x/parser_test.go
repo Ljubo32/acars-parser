@@ -9,15 +9,15 @@ import (
 func TestParseILNGE7XSummary(t *testing.T) {
 	parser := &Parser{}
 	tests := []struct {
-		name           string
-		text           string
-		wantTail       string
-		wantFlight     string
+		name            string
+		text            string
+		wantTail        string
+		wantFlight      string
 		wantTakeOffDate string
 		wantTakeOffTime string
-		wantOrigin     string
+		wantOrigin      string
 		wantDestination string
-		wantRoute      string
+		wantRoute       string
 	}{
 		{
 			name:            "tail with separator digit two",
@@ -97,6 +97,9 @@ func TestParseILNGE7XSummary(t *testing.T) {
 
 			if result.Tail != tc.wantTail {
 				t.Errorf("Tail = %q, want %q", result.Tail, tc.wantTail)
+			}
+			if result.MsgType != "ILNGE" {
+				t.Errorf("MsgType = %q, want %q", result.MsgType, "ILNGE")
 			}
 			if result.Flight != tc.wantFlight {
 				t.Errorf("Flight = %q, want %q", result.Flight, tc.wantFlight)

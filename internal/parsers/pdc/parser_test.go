@@ -14,6 +14,7 @@ func TestParser(t *testing.T) {
 			flightNum    string
 			origin       string
 			destination  string
+			departureTime string
 			runway       string
 			sid          string
 			squawk       string
@@ -42,6 +43,7 @@ XXX EXPECT RUNWAY 01R XXX`,
 				flightNum    string
 				origin       string
 				destination  string
+				departureTime string
 				runway       string
 				sid          string
 				squawk       string
@@ -75,6 +77,7 @@ DE-ICING, REPORT READY ON FREQ 121.9306DAA`,
 				flightNum    string
 				origin       string
 				destination  string
+				departureTime string
 				runway       string
 				sid          string
 				squawk       string
@@ -108,6 +111,7 @@ FILED FLT LEVEL 280`,
 				flightNum    string
 				origin       string
 				destination  string
+				departureTime string
 				runway       string
 				sid          string
 				squawk       string
@@ -121,6 +125,31 @@ FILED FLT LEVEL 280`,
 				destination:  "", // Only IATA DTW in header, no ICAO destination
 				squawk:       "2747",
 				aircraftType: "B712",
+			},
+		},
+		{
+			name: "Saudi A3 PDC keeps ZGSZ destination",
+			text: `/RUHEAYA.DC1/CLD 0530 260313 OERK PDC 254 SVA992 CLRD TO ZGSZ OFF 15L VIA RWYHDG SQUAWK 4215 ATIS V EOBT 0550 FL080 READY 121.600 A662`,
+			want: struct {
+				flightNum    string
+				origin       string
+				destination  string
+				departureTime string
+				runway       string
+				sid          string
+				squawk       string
+				depFreq      string
+				altitude     string
+				aircraftType string
+				atis         string
+			}{
+				flightNum:     "SVA992",
+				origin:        "OERK",
+				destination:   "ZGSZ",
+				departureTime: "0550",
+				runway:        "15L",
+				squawk:        "4215",
+				atis:          "V",
 			},
 		},
 	}
@@ -156,6 +185,10 @@ FILED FLT LEVEL 280`,
 				t.Errorf("Destination: got %q, want %q", pdc.Destination, tc.want.destination)
 			}
 
+			if tc.want.departureTime != "" && pdc.DepartureTime != tc.want.departureTime {
+				t.Errorf("DepartureTime: got %q, want %q", pdc.DepartureTime, tc.want.departureTime)
+			}
+
 			if pdc.Runway != tc.want.runway {
 				t.Errorf("Runway: got %q, want %q", pdc.Runway, tc.want.runway)
 			}
@@ -168,7 +201,7 @@ FILED FLT LEVEL 280`,
 				t.Errorf("Squawk: got %q, want %q", pdc.Squawk, tc.want.squawk)
 			}
 
-			if pdc.DepartureFreq != tc.want.depFreq {
+			if tc.want.depFreq != "" && pdc.DepartureFreq != tc.want.depFreq {
 				t.Errorf("DepartureFreq: got %q, want %q", pdc.DepartureFreq, tc.want.depFreq)
 			}
 
@@ -176,7 +209,7 @@ FILED FLT LEVEL 280`,
 				t.Errorf("InitialAltitude: got %q, want %q", pdc.InitialAltitude, tc.want.altitude)
 			}
 
-			if pdc.AircraftType != tc.want.aircraftType {
+			if tc.want.aircraftType != "" && pdc.AircraftType != tc.want.aircraftType {
 				t.Errorf("AircraftType: got %q, want %q", pdc.AircraftType, tc.want.aircraftType)
 			}
 

@@ -55,6 +55,12 @@ When `Waypoints.txt` contains multiple fixes with the same name in different reg
 
 When the viewer is served over HTTP from the `gui/` directory, it will try to load `Waypoints.txt` automatically. When the HTML file is opened directly from disk and the browser blocks sibling-file fetches, use the `Load Waypoints` picker in the viewer to load the same file manually.
 
+When JSON output is produced through [gui/acars_parser_gui_dnd_fix2.py](gui/acars_parser_gui_dnd_fix2.py), the GUI can also enrich each JSON row with route lookup data from [gui/flightroute.sqb](gui/flightroute.sqb) when that database is present. The `Route lookup from flightroute.sqb` checkbox controls that behaviour, so route enrichment can be turned off when faster JSON generation is preferred. When enabled, the lookup uses the already normalised ICAO-style flight value, queries the `FlightRoute` table by the `flight` column, and stores the matched `route` plus the latest `updatetime` on the JSON row. In the HTML viewer, those fields are now rendered directly underneath the Flight value instead of using a separate Route column. If no lookup row is found, or the database is unavailable, extraction continues and only the Flight value is shown.
+
+When that rendered `route` value is in the ICAO `XXXX-XXXX` format and it does not match the best parsed origin/destination pair already present in the JSON, the viewer now highlights that route line in dark red under the Flight value. The viewer also highlights the `updatetime` line in dark red when it begins with `1`, which helps suspicious Unix-style timestamps stand out during review.
+
+The viewer now always shows a `raw text` details block for non-empty ACARS payload text, including single-line messages. That block no longer relies on any symbol-limit style truncation in the details panel; instead it wraps long lines to the available panel width.
+
 ### extract
 
 Extracts structured data from JSONL files and JAERO TXT logs containing ACARS messages.
@@ -66,6 +72,10 @@ Extracts structured data from JSONL files and JAERO TXT logs containing ACARS me
 The `extract` command autodetects JSONL and JAERO TXT input. For JAERO logs, the CLI converts each timestamped block into a normal ACARS message, keeps only the raw ACARS payload in `message.text`, preserves legitimate multiline payload text, strips JAERO line-wrap artefacts such as inserted `- #MD` continuations, and skips empty blocks.
 
 For AFN payloads that contain segments such as `/FMH<flight>` and `/FAK0,<destination>`, the extractor also infers the flight number, a clean tail fallback, and `destination_airport` directly from the raw message text before serialising the output JSON. It also infers the flight from FPN headers in the form `FPN/FN<flight>/...`, so values such as `FPN/FNSVA1047/...` populate `message.flight` in the emitted JSON.
+
+For RA payloads carrying `INI01` initialisation messages such as `QUDXBEGEK~1INI01091501 UAE810 /09/OEMA/OMDB/...`, the extractor now infers `message.flight`, `message.departing_airport`, and `message.destination_airport` from the raw message text. The parsed result for those rows now also exposes `msg_type: "INI"`.
+
+For RA acknowledgement and failure payloads that include literals such as `FLIGHT NUMBER: EK0806/UAE806 SECTOR: OEJN-OMDB` or `FLIGHT NUMBER: UAE394 SECTOR: OMDB-VVNB`, the extractor now also infers `message.flight`, `message.departing_airport`, and `message.destination_airport` directly from the raw message text. When the `FLIGHT NUMBER:` field carries both an IATA-style and ICAO-style identifier separated by `/`, the extractor prefers the ICAO-style flight value after the slash.
 
 For PDC-style clearances, including label `A3` payloads such as `/...DC1/CLD ... ZSSS PDC ... CES239 CLRD TO VMMC ...`, the extractor also populates `message.flight`, `message.departing_airport`, and `message.destination_airport` from the raw clearance text.
 
@@ -80,6 +90,8 @@ The ADS-C backend now also decodes air-reference Mach values with the correct 0.
 In the HTML viewer, ADS-C label `B6` downlink messages now get the same expanded raw-text treatment as `A6`: instead of showing only the opaque hex block, the viewer renders a libacars-style indented text view built from the parsed ADS-C result, including the downlink type, basic report, flight IDs, airframe ID, earth-reference data, air-reference data, meteo data, and predicted route when those tags are present.
 
 For nested `dumphfdl` JSON lines carrying HFDL `hfnpdu` data types such as `Frequency data` or `Performance data`, the extractor now preserves a synthetic `HFDL` message when `hfnpdu.flight_id` and `hfnpdu.pos.lat/lon` are present. This allows such rows to survive extraction with `flight_id`, coordinates, ICAO address, and a parsed `hfdl_data` result that the HTML viewer can place on the map.
+
+The compact H1 `EB00` and `SB01` parsers now also emit `msg_type: "EBSB"` in their parsed JSON results while keeping their existing parser identities unchanged.
 
 The HTML viewer also gives `hfdl_data` rows a dedicated summary, parsed-details block, and map popup so `hfnpdu_type`, `flight_id`, ICAO address, ground station, synthetic HFDL text, and coordinates are readable without digging through the flattened raw JSON. On the map, direct HFDL points also use a distinct teal marker so they stand out from the generic ACARS position markers.
 
@@ -236,10 +248,10 @@ Parses route messages containing callsign, origin/destination airports (IATA/ICA
 Parses classic waypoint position reports and `POSA` position reports with coordinates, flight level, waypoint ETAs, temperature, wind, fuel on board, and Mach number.
 
 ### ILNGE7X Summary
-Parses `/ILNGE7X.` summary messages and extracts the tail, flight, take-off date/time, and origin-destination route.
+Parses `/ILNGE7X.` summary messages and extracts the tail, flight, take-off date/time, and origin-destination route. The parsed JSON result also emits `msg_type: "ILNGE"`.
 
 ### REP301
-Parses compact `REP301` reports regardless of the ACARS label. Extracts the route, origin/destination, latitude/longitude, report time, flight level in tenths, temperature in Celsius, and wind direction/speed in knots and km/h.
+Parses compact `REP301` reports regardless of the ACARS label. Extracts the route, origin/destination, latitude/longitude, report time, flight level in tenths, temperature in Celsius, and wind direction/speed in knots and km/h. The parsed JSON result also emits `msg_type: "REP301"`.
 
 ### Position (80)
 Extracts current position (lat/lon), altitude, ground speed, and flight routing.
@@ -255,10 +267,11 @@ Parses ADS-C (Automatic Dependent Surveillance - Contract) position reports usin
 - **Airframe ID** (tag 17): ICAO hex address
 
 ### Flight Plan (H1 FPN)
-Extracts flight plan data including waypoints, origin/destination, and route information.
+Extracts flight plan data including waypoints, origin/destination, and route information. The parsed JSON result also emits `msg_type: "FPN"`.
 
 ### H1 Position (H1 POS)
 Parses H1 position reports with current/next waypoint, altitude, and coordinates.
+The parsed JSON result also emits `msg_type: "POS"`.
 
 ### SB01 (H1)
 Parses compact `SB01` status messages carried on label `H1`. Extracts the registration, route, latitude/longitude, report time, altitude in feet and metres, temperature in Celsius, and wind direction/speed in knots and km/h.
@@ -277,6 +290,9 @@ Extracts wind and temperature forecasts along the route:
 - **Climb winds (CB)**: Wind direction/speed at various altitudes during climb
 - **Route winds (WD)**: Wind direction/speed/temperature at waypoints for each flight level
 - **Descent winds (DD)**: Wind direction/speed at various altitudes during descent
+
+The parsed JSON result also emits `msg_type: "PWI"`.
+Route-wind waypoints may be named fixes or compact coordinates such as `N24012E078331`; coordinate waypoints are exported with latitude/longitude so the viewer can draw them on the map.
 
 Example PWI data structure:
 ```json
@@ -309,9 +325,11 @@ Parses position reports with coordinates, altitude, and destination.
 
 ### Oceanic Clearance (B2)
 Extracts oceanic clearance data including track, flight level, and Mach number.
+The parsed JSON result also emits `msg_type: "OCEANIC_CLEARANCE"`.
 
 ### Gate Info (B3)
 Parses gate information messages with flight number and gate assignment.
+The parsed JSON result also emits `msg_type: "GATEINFO"`.
 
 ### Position + Weather (4J)
 Extracts combined position and weather data.
@@ -333,6 +351,7 @@ Parses comprehensive flight status messages with route, position, fuel, wind, an
 ```
 AGFSR AC1204/29/29/YULMIA/1829Z/110/3457.3N07711.0W/300/CRUISE/0067/0052/M37/248095/0300/202/02/1432/1640/
 ```
+The parsed JSON result also emits `msg_type: "AGFSR"`.
 
 ### Label 22 - Detailed Position (13k messages)
 Parses detailed position reports in degrees/minutes/seconds format.
@@ -352,7 +371,7 @@ Parses flight status reports with route, position, temperature, and FST01 fixed-
 FST01EGLCEIDWN51420W00049317803270072M020C014331258256370
 ```
 
-For the space-delimited FST01 layout, the parser extracts the route, coordinates, flight level, temperature, wind direction, heading, track, and ground speed. Wind speed and ground speed are exposed via `wind_speed_kts` / `wind_speed_kmh` and `ground_speed_kts` / `ground_speed_kmh`, while the JSON output keeps the route as a single field instead of repeating separate origin and destination keys.
+For the space-delimited FST01 layout, the parser extracts the route, coordinates, flight level, temperature, wind direction, heading, track, and ground speed. Wind speed and ground speed are exposed via `wind_speed_kts` / `wind_speed_kmh` and `ground_speed_kts` / `ground_speed_kmh`, while the JSON output keeps the route as a single field instead of repeating separate origin and destination keys. The parsed JSON result also emits `msg_type: "FST"`.
 
 ### Label 83 - Position Reports (3.6k messages)
 Parses PR and ZSPD position report formats.
@@ -365,6 +384,7 @@ Parses wind/weather data with multiple altitude layers.
 ```
 02A291829EDDKLSZHN50529E007101291809   6M005   48P002290008G
 ```
+The parsed JSON result also emits `msg_type: "H2WIND"`.
 
 ### Label 44 - Runway/Procedure Info (3k messages)
 Parses runway takeoff information, FB positions, and POS reports.
@@ -380,12 +400,14 @@ Parses envelope-formatted messages containing aircraft position and status data.
 
 ### Gate Assignment (RA)
 Parses gate assignment messages with flight and gate information.
+The parsed JSON result also emits `msg_type: "GATEASSIGN"`.
 
 ### Landing Data (C1)
 Parses landing performance data including runway, approach, and configuration.
+The parsed JSON result also emits `msg_type: "LANDINGDATA"`.
 
-### Loadsheet (C1)
-Parses aircraft loadsheet messages with weight and balance information.
+### Loadsheet (All Labels)
+Parses aircraft loadsheet messages with weight and balance information regardless of ACARS label. The parser recognises both `LOADSHEET` and spaced `L O A D S H E E T` headers, and the parsed JSON result also emits `msg_type: "LOADSHEET"`.
 
 ### Turbulence (C1)
 Parses turbulence reports with severity and location data.
@@ -558,7 +580,7 @@ Each parser lives in `internal/parsers/<name>/parser.go`:
 | Label B2 | `B2` | `oceanic_clearance` | `internal/parsers/labelb2/parser.go` |
 | Label B3 | `B3` | `gate_info` | `internal/parsers/labelb3/parser.go` |
 | Landing Data | `C1` | `landing_data` | `internal/parsers/landingdata/parser.go` |
-| Loadsheet | `C1` | `loadsheet` | `internal/parsers/loadsheet/parser.go` |
+| Loadsheet | `all` | `loadsheet` | `internal/parsers/loadsheet/parser.go` |
 | Media Advisory | `SA` | `media_advisory` | `internal/parsers/mediaadv/parser.go` |
 | PDC | *(content-based)* | `pdc` | `internal/parsers/pdc/parser.go` |
 | SQ | `SQ` | `sq_position` | `internal/parsers/sq/parser.go` |

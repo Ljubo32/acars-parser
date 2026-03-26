@@ -46,6 +46,9 @@
     hyphens: none;
   }
   .metarow td { padding-top: 0; }
+  .routecell-main { white-space: nowrap; }
+  .routecell-sub { margin-top: 3px; color: #667085; font-size: 12px; white-space: nowrap; }
+  .routecell-alert { color: #7f1d1d; font-weight: 600; }
 
   /* Big Leaflet popups: 75% viewport */
     .leaflet-popup.big-popup .leaflet-popup-content-wrapper { width: auto; height: auto; max-width: 75vw; max-height: 75vh; }
@@ -113,8 +116,17 @@
   .modal .hdr .title { font-weight: 600; }
   #map { flex: 1; }
 
+  .message-summary code {
+    display: block;
+    max-width: 100%;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+  }
+
   /* Raw message text block (keeps newlines) */
   .rawtext {
+    display: block;
     margin: 8px 0 0;
     padding: 10px;
     background: #0b1020;
@@ -124,8 +136,11 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
     font-size: 12px;
     white-space: pre-wrap;     /* preserve \r\n but wrap long lines */
-    word-break: break-word;    /* break very long tokens */
+    word-break: break-word;
     overflow-wrap: anywhere;
+    max-width: 100%;
+    width: 100%;
+    box-sizing: border-box;
   }
 
 </style>
@@ -149,6 +164,7 @@
     <select id="label"></select>
     <select id="type"></select>
     <label class="cb"><input id="onlyCoords" type="checkbox"> only with coords</label>
+    <label class="cb"><input id="onlyFlight" type="checkbox"> only with Flight</label>
     <label class="cb small">page size
       <select id="pageSize">
         <option value="50">50</option>
@@ -169,14 +185,14 @@
   <table class="main-table">
     <thead>
       <tr>
-        <th style="width:170px">Timestamp</th>
+        <th id="thTimestamp" class="sortable" style="width:170px">Timestamp<span class="sort-indicator"></span></th>
         <th id="thTail" class="sortable" style="width:120px">Tail/Reg<span class="sort-indicator"></span></th>
-        <th id="thFlight" class="sortable" style="width:130px">Flight<span class="sort-indicator"></span></th>
+        <th id="thFlight" class="sortable" style="width:170px">Flight<span class="sort-indicator"></span></th>
         <th style="width:90px">Label</th>
         <th style="width:130px">Type</th>
         <th style="width:110px">Coords</th>
         <th style="width:120px">Map</th>
-        <th>Summary / Details</th>
+        <th id="thDetails" class="sortable">Summary / Details<span class="sort-indicator"></span></th>
       </tr>
     </thead>
     <tbody id="tbody"></tbody>
@@ -440,20 +456,6 @@ function extractCoords(obj){
 function extractFlightDisplay(obj){
   if (!obj || typeof obj !== 'object') return "";
 
-  const normaliseFlightCode = (value) => {
-    if (typeof value !== 'string') return "";
-    const trimmed = value.trim();
-    if (!trimmed) return "";
-
-    const match = trimmed.match(/^([A-Z-]+)(\d+)([A-Z]?)$/i);
-    if (!match) return trimmed;
-
-    const prefix = match[1];
-    const digits = String(parseInt(match[2], 10));
-    const suffix = match[3] || "";
-    return prefix + digits + suffix;
-  };
-
   const formatPair = (flight, flightId) => {
     const parts = [];
     if (typeof flight === 'string' && flight.trim()) parts.push(normaliseFlightCode(flight));
@@ -476,6 +478,126 @@ function extractFlightDisplay(obj){
 function getFlightDisplayForRow(row){
   if (!row || typeof row !== 'object') return '';
   return extractFlightDisplay(row.raw || row) || row.flight || '';
+}
+
+function normaliseFlightCode(value){
+  if (typeof value !== 'string') return "";
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+
+  const match = trimmed.match(/^([A-Z-]+)(\d+)([A-Z]?)$/i);
+  if (!match) return trimmed.toUpperCase();
+
+  const prefix = match[1].toUpperCase();
+  const digits = String(parseInt(match[2], 10));
+  const suffix = (match[3] || "").toUpperCase();
+  return prefix + digits + suffix;
+}
+
+function extractRouteLookup(obj){
+  if (!obj || typeof obj !== 'object') return null;
+
+  const candidates = [
+    obj.route_lookup,
+    obj.routeLookup,
+    obj.raw && typeof obj.raw === 'object' ? obj.raw.route_lookup : null,
+    obj.raw && typeof obj.raw === 'object' ? obj.raw.routeLookup : null
+  ];
+
+  for (const candidate of candidates){
+    if (!candidate || typeof candidate !== 'object') continue;
+    const route = typeof candidate.route === 'string' ? candidate.route.trim() : '';
+    const updatedAt = typeof candidate.updatetime === 'string' ? candidate.updatetime.trim() : '';
+    if (!route && !updatedAt) continue;
+    return { route, updatetime: updatedAt };
+  }
+
+  return null;
+}
+
+function isValidICAOCode(value){
+  return typeof value === 'string' && /^[A-Z]{4}$/.test(value.trim().toUpperCase());
+}
+
+function normaliseICAOCode(value){
+  if (typeof value !== 'string') return '';
+  const code = value.trim().toUpperCase();
+  return isValidICAOCode(code) ? code : '';
+}
+
+function parseICAORoutePair(value){
+  if (typeof value !== 'string') return null;
+  const match = value.trim().toUpperCase().match(/^([A-Z]{4})-([A-Z]{4})$/);
+  if (!match) return null;
+  return { origin: match[1], destination: match[2] };
+}
+
+function extractAirportPair(originValue, destinationValue){
+  const origin = normaliseICAOCode(originValue);
+  const destination = normaliseICAOCode(destinationValue);
+  if (!origin || !destination) return null;
+  return { origin, destination };
+}
+
+function extractAirportPairFromObject(obj, originKeys, destinationKeys){
+  if (!obj || typeof obj !== 'object') return null;
+
+  for (const originKey of originKeys){
+    for (const destinationKey of destinationKeys){
+      const pair = extractAirportPair(obj[originKey], obj[destinationKey]);
+      if (pair) return pair;
+    }
+  }
+
+  return null;
+}
+
+function extractParsedRoutePair(obj){
+  if (!obj || typeof obj !== 'object') return null;
+
+  const messageFlight = obj.message && typeof obj.message === 'object' ? obj.message.flight : null;
+  const messagePair = extractAirportPairFromObject(messageFlight, ['departing_airport'], ['destination_airport']);
+  if (messagePair) return messagePair;
+
+  const directPair = extractAirportPairFromObject(obj, ['origin', 'origin_icao'], ['destination', 'dest_icao']);
+  if (directPair) return directPair;
+
+  let fallbackRoutePair = parseICAORoutePair(obj.route);
+  const results = Array.isArray(obj.results) ? obj.results : [];
+  for (const result of results){
+    if (!result || typeof result !== 'object') continue;
+
+    const resultPair = extractAirportPairFromObject(result, ['origin', 'origin_icao'], ['destination', 'dest_icao']);
+    if (resultPair) return resultPair;
+
+    if (!fallbackRoutePair) {
+      fallbackRoutePair = parseICAORoutePair(result.route);
+    }
+  }
+
+  return fallbackRoutePair;
+}
+
+function getRouteDisplayState(row){
+  const routeLookup = row?.routeLookup || extractRouteLookup(row?.raw || row) || null;
+  const routeValue = String(routeLookup?.route || '').trim();
+  const routeUpdatedAt = String(routeLookup?.updatetime || '').trim();
+  const lookupPair = parseICAORoutePair(routeValue);
+  const parsedPair = extractParsedRoutePair(row?.raw || row);
+  const hasComparableRoute = !!(lookupPair && parsedPair);
+  const routeMismatch = hasComparableRoute && (
+    lookupPair.origin !== parsedPair.origin ||
+    lookupPair.destination !== parsedPair.destination
+  );
+
+  return {
+    routeValue,
+    routeUpdatedAt,
+    lookupPair,
+    parsedPair,
+    routeMismatch,
+    isUnixLikeUpdateTime: routeUpdatedAt.startsWith('1')
+  };
 }
 
 function escapeHtml(s){
@@ -502,6 +624,63 @@ function compareSortText(left, right){
   return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
 }
 
+function compareSortNumber(left, right){
+  const a = Number.isFinite(left) ? left : -1;
+  const b = Number.isFinite(right) ? right : -1;
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
+}
+
+function getRowTimestampSortValue(row){
+  if (!row || typeof row !== 'object') return -1;
+
+  const candidates = [
+    row.timestamp,
+    row?.raw?.timestamp,
+    row?.raw?.message?.timestamp
+  ];
+
+  for (const candidate of candidates){
+    if (candidate === null || candidate === undefined || candidate === '') continue;
+    if (typeof candidate === 'number' && Number.isFinite(candidate)) {
+      return candidate;
+    }
+    if (typeof candidate === 'string') {
+      const numeric = candidate.trim();
+      if (/^-?\d+(?:\.\d+)?$/.test(numeric)) {
+        const value = Number(numeric);
+        if (Number.isFinite(value)) return value;
+      }
+      const parsed = Date.parse(candidate);
+      if (!Number.isNaN(parsed)) return parsed;
+    }
+  }
+
+  return -1;
+}
+
+function getRowMessageDataAmount(row){
+  if (!row || typeof row !== 'object') return 0;
+
+  const rawText = String(
+    row?.raw?.message?.text ??
+    row?.raw?.message?.msg_text ??
+    row?.raw?.text ??
+    row?.raw?.msg_text ??
+    ''
+  );
+  if (rawText.trim()) return rawText.length;
+
+  try {
+    const rawJson = JSON.stringify(row.raw ?? row);
+    if (typeof rawJson === 'string' && rawJson.length) return rawJson.length;
+  } catch (err) {
+    // Ignore serialisation failures and fall back to summary length.
+  }
+
+  return String(row.summary || '').length;
+}
+
 function applySort(){
   if (!sortState.key) return;
 
@@ -511,10 +690,14 @@ function applySort(){
     const right = rows[rightIdx];
 
     let cmp = 0;
-    if (sortState.key === 'tail'){
+    if (sortState.key === 'timestamp'){
+      cmp = compareSortNumber(getRowTimestampSortValue(left), getRowTimestampSortValue(right));
+    } else if (sortState.key === 'tail'){
       cmp = compareSortText(left && left.tail, right && right.tail);
     } else if (sortState.key === 'flight'){
       cmp = compareSortText(getFlightDisplayForRow(left), getFlightDisplayForRow(right));
+    } else if (sortState.key === 'details'){
+      cmp = compareSortNumber(getRowMessageDataAmount(left), getRowMessageDataAmount(right));
     }
 
     if (cmp !== 0) return cmp * dir;
@@ -524,8 +707,10 @@ function applySort(){
 
 function updateSortHeaders(){
   const headers = [
+    { id: 'thTimestamp', key: 'timestamp' },
     { id: 'thTail', key: 'tail' },
-    { id: 'thFlight', key: 'flight' }
+    { id: 'thFlight', key: 'flight' },
+    { id: 'thDetails', key: 'details' }
   ];
 
   for (const header of headers){
@@ -786,6 +971,7 @@ function normalizeInput(parsed){
         manufacturerModel: msg.manufacturer_model ?? msg.manufacturerModel ?? msg.airframe?.manufacturer_model ?? msg.airframe?.manufacturerModel ?? "",
         tail: msg.tail || msg.reg || msg.registration || "",
         flight: extractFlightDisplay(rawObj),
+        routeLookup: extractRouteLookup(it) || extractRouteLookup(rawObj),
         label: String(msg.label || ""),
         type: String(typ || "unknown"),
         lat: lat,
@@ -820,6 +1006,7 @@ function normalizeInput(parsed){
         manufacturerModel: o.manufacturer_model ?? o.manufacturerModel ?? o.airframe?.manufacturer_model ?? o.airframe?.manufacturerModel ?? o.message?.airframe?.manufacturer_model ?? o.message?.airframe?.manufacturerModel ?? "",
         tail: reg,
         flight: extractFlightDisplay(o),
+        routeLookup: extractRouteLookup(o),
         label: String(lbl || ""),
         type: String(typ || "parsed"),
         lat: lat2,
@@ -843,6 +1030,7 @@ function normalizeInput(parsed){
       manufacturerModel: o.manufacturerModel ?? o.manufacturer_model ?? o.airframe?.manufacturer_model ?? o.airframe?.manufacturerModel ?? o.message?.airframe?.manufacturer_model ?? o.message?.airframe?.manufacturerModel ?? "",
       tail: o.tail || o.registration || "",
       flight: extractFlightDisplay(o.raw || o),
+      routeLookup: extractRouteLookup(o.raw || o) || extractRouteLookup(o),
       label: String(o.label || (String(o.type || o.message_type || '').trim() === 'hfdl_data' ? 'HFDL' : '') || ""),
       type: String(o.type || o.message_type || ""),
       lat: lat,
@@ -880,16 +1068,19 @@ function recomputeFilter(){
   const lbl = document.getElementById('label').value;
   const typ = document.getElementById('type').value;
   const onlyCoords = document.getElementById('onlyCoords').checked;
+  const onlyFlight = document.getElementById('onlyFlight').checked;
 
   const idx = [];
   for (let i=0; i<rows.length; i++){
     const r = rows[i];
     const flightDisplay = getFlightDisplayForRow(r);
     if (onlyCoords && !(isNum(r.lat) && isNum(r.lon))) continue;
+    if (onlyFlight && !flightDisplay.trim()) continue;
     if (lbl && r.label !== lbl) continue;
     if (typ && r.type !== typ) continue;
     if (q){
-      const hay = `${r.tail} ${flightDisplay} ${r.label} ${r.type} ${r.summary}`.toLowerCase();
+      const routeText = `${r.routeLookup?.route || ''} ${r.routeLookup?.updatetime || ''}`.trim();
+      const hay = `${r.tail} ${flightDisplay} ${r.label} ${r.type} ${routeText} ${r.summary}`.toLowerCase();
       if (!hay.includes(q)) continue;
     }
     idx.push(i);
@@ -927,6 +1118,7 @@ function makeDetailsCell(rowIndex){
   const wrap = document.createElement('div');
 
   const header = document.createElement('div');
+  header.className = 'message-summary';
   const parts = [];
   if (r.summary) parts.push(r.summary);
   if (isNum(r.lat) && isNum(r.lon)) parts.push(`lat ${r.lat}, lon ${r.lon}`);
@@ -946,13 +1138,7 @@ function makeDetailsCell(rowIndex){
     (r && r.raw && (r.raw.text ?? r.raw.msg_text)) ??
     "";
    const displayRawText = getDisplayRawText(r, messageLabel, rawText);
-   const showRawText = displayRawText && (
-     messageLabel === 'AA' ||
-     messageLabel === 'SA' ||
-     messageLabel === 'A6' ||
-     messageLabel === 'B6' ||
-     /[\r\n]/.test(String(displayRawText))
-   );
+   const showRawText = typeof displayRawText === 'string' && displayRawText.trim() !== '';
    if (showRawText){
     const detRaw = document.createElement('details');
     const sumRaw = document.createElement('summary');
@@ -1154,6 +1340,15 @@ function formatCPDLCRawElementDetails(element){
   const label = String(element?.label || '').trim();
   const text = String(data.text || '').trim();
 
+  const positionLatitude = Number(data?.position?.latitude);
+  const positionLongitude = Number(data?.position?.longitude);
+  if (Number.isFinite(positionLatitude)) {
+    lines.push(`Latitude:   ${formatCPDLCAngleLine(positionLatitude, 'lat')}`);
+  }
+  if (Number.isFinite(positionLongitude)) {
+    lines.push(`Longitude: ${formatCPDLCAngleLine(positionLongitude, 'lon')}`);
+  }
+
   const positionName = String(data?.position?.name || '').trim();
   if (positionName) {
     lines.push(`Fix: ${positionName}`);
@@ -1186,12 +1381,15 @@ function formatCPDLCRawElementDetails(element){
   if (Number.isFinite(frequencyValue)) {
     const prefix = frequencyType ? `${frequencyType.toUpperCase()}: ` : 'Frequency: ';
     let suffix = '';
+    let valueText = formatCompactNumber(frequencyValue, 3);
     if (frequencyType === 'vhf' || frequencyType === 'uhf') {
       suffix = ' MHz';
+      valueText = frequencyValue.toFixed(3);
     } else if (frequencyType === 'hf') {
       suffix = ' kHz';
+      valueText = Number.isInteger(frequencyValue) ? String(frequencyValue) : formatCompactNumber(frequencyValue, 3);
     }
-    lines.push(`${prefix}${frequencyValue.toFixed(3)}${suffix}`.trim());
+    lines.push(`${prefix}${valueText}${suffix}`.trim());
   }
 
   const timeHours = data?.time?.hours;
@@ -1215,6 +1413,11 @@ function formatCPDLCRawElementDetails(element){
     lines.push(`Facility designation: ${facilityDesignation}`);
   }
 
+  const errorDescription = String(data.description || '').trim();
+  if (errorDescription) {
+    lines.push(`Error information: ${errorDescription}`);
+  }
+
   const tp4Table = String(data.tp4_table || '').trim();
   if (tp4Table) {
     lines.push(`TP4 table: ${tp4Table}`);
@@ -1229,9 +1432,10 @@ function formatCPDLCRawElementDetails(element){
       lines.push(` Airway ID: ${airwayIntercept}`);
     }
     for (const routeItem of routeInformation) {
-      const value = String(routeItem || '').trim();
-      if (value) {
-        lines.push(` Airway ID: ${value}`);
+      for (const routeLine of formatCPDLCRouteInformationLines(routeItem)) {
+        if (routeLine) {
+          lines.push(` ${routeLine}`);
+        }
       }
     }
     if (routeInfoAdditional) {
@@ -1248,6 +1452,84 @@ function formatCPDLCRawElementDetails(element){
   }
 
   return lines;
+}
+
+function formatCPDLCRouteInformationLines(routeItem){
+  if (!routeItem) return [];
+
+  if (typeof routeItem === 'string') {
+    const text = routeItem.trim();
+    return text ? [`Route item: ${text}`] : [];
+  }
+
+  if (typeof routeItem !== 'object') {
+    const text = String(routeItem).trim();
+    return text ? [`Route item: ${text}`] : [];
+  }
+
+  const lines = [];
+  const kind = String(routeItem.kind || '').trim().toLowerCase();
+  const airway = String(routeItem.airway || '').trim();
+  const text = String(routeItem.text || '').trim();
+  const position = routeItem.position && typeof routeItem.position === 'object' ? routeItem.position : null;
+
+  if (airway) {
+    lines.push(`Airway ID: ${airway}`);
+  }
+
+  if (position) {
+    const positionName = String(position.name || position.fix_name || '').trim();
+    const latitude = Number(position.latitude);
+    const longitude = Number(position.longitude);
+    const bearing = Number(position.bearing);
+    const distance = Number(position.distance);
+    const distanceUnit = String(position.distance_unit || '').trim();
+
+    if (positionName) {
+      lines.push(`Fix: ${positionName}`);
+    }
+    if (Number.isFinite(latitude)) {
+      lines.push(`Latitude:   ${formatCPDLCAngleLine(latitude, 'lat')}`);
+    }
+    if (Number.isFinite(longitude)) {
+      lines.push(`Longitude: ${formatCPDLCAngleLine(longitude, 'lon')}`);
+    }
+    if (Number.isFinite(bearing)) {
+      lines.push(`Bearing: ${formatCompactNumber(bearing, 1)} deg`);
+    }
+    if (Number.isFinite(distance)) {
+      lines.push(`Distance: ${formatCompactNumber(distance, 1)}${distanceUnit ? ` ${distanceUnit}` : ''}`);
+    }
+  }
+
+  if (text) {
+    if (kind === 'airway' && !airway) {
+      lines.push(`Airway ID: ${text}`);
+    } else {
+      lines.push(`Route item: ${text}`);
+    }
+  }
+
+  return lines;
+}
+
+function formatCPDLCAngleLine(value, axis){
+  const absolute = Math.abs(Number(value));
+  if (!Number.isFinite(absolute)) return '';
+
+  const isLatitude = axis === 'lat';
+  const direction = isLatitude
+    ? (value < 0 ? 'south' : 'north')
+    : (value < 0 ? 'west' : 'east');
+  const rounded = Math.round(absolute);
+  const isWholeDegree = Math.abs(absolute - rounded) < 0.0001;
+
+  if (isWholeDegree) {
+    const degreeText = isLatitude ? String(rounded) : String(rounded).padStart(3, '0');
+    return `${degreeText} deg ${direction}`;
+  }
+
+  return `${formatCompactNumber(absolute, 4)} deg ${direction}`;
 }
 
 function cpdlcTitle(cpdlc){
@@ -1712,6 +1994,11 @@ function parseADSPeriodicRequest(payload, adsc){
   for (let index = 2; index < payload.length; ) {
     const tag = payload[index++];
 
+    if (tag === 0x14) {
+      request.items.push('Report waypoint changes');
+      continue;
+    }
+
     if (tag === 0x15) {
       if (index + 1 >= payload.length) break;
       const every = payload[index++];
@@ -1724,11 +2011,33 @@ function parseADSPeriodicRequest(payload, adsc){
       continue;
     }
 
+    if (tag === 0x13) {
+      if (index + 3 >= payload.length) break;
+      const ceilingAlt = decodeADSContractAltitude(payload[index], payload[index + 1]);
+      const floorAlt = decodeADSContractAltitude(payload[index + 2], payload[index + 3]);
+      index += 4;
+      request.items.push(`Report when altitude out of range: ${floorAlt}-${ceilingAlt} ft`);
+      continue;
+    }
+
     if (index >= payload.length) break;
     const value = payload[index++];
 
     if (tag === 0x0B) {
       request.intervalSecs = decodeADSReportingInterval(value, request.intervalSecs);
+      continue;
+    }
+
+    if (tag === 0x12) {
+      const threshold = decodeADSVerticalSpeedThreshold(value);
+      if (threshold) {
+        request.items.push(`Report when vertical speed is: ${threshold}`);
+      }
+      continue;
+    }
+
+    if (tag === 0x0A) {
+      request.items.push(`Report when lateral deviation exceeds: ${formatCompactNumber(value / 8, 3)} nm`);
       continue;
     }
 
@@ -1751,10 +2060,47 @@ function parseADSEventRequest(payload, adsc){
     items: []
   };
 
-  for (let index = 2; index < payload.length; index++) {
-    const tag = payload[index];
+  for (let index = 2; index < payload.length; ) {
+    const tag = payload[index++];
+
     if (tag === 0x14) {
       request.items.push('Report waypoint changes');
+      continue;
+    }
+
+    if (tag === 0x13) {
+      if (index + 3 >= payload.length) break;
+      const ceilingAlt = decodeADSContractAltitude(payload[index], payload[index + 1]);
+      const floorAlt = decodeADSContractAltitude(payload[index + 2], payload[index + 3]);
+      index += 4;
+      request.items.push(`Report when altitude out of range: ${floorAlt}-${ceilingAlt} ft`);
+      continue;
+    }
+
+    if (index >= payload.length) break;
+    const value = payload[index++];
+
+    if (tag === 0x12) {
+      const threshold = decodeADSVerticalSpeedThreshold(value);
+      if (threshold) {
+        request.items.push(`Report when vertical speed is: ${threshold}`);
+      }
+      continue;
+    }
+
+    if (tag === 0x0A) {
+      request.items.push(`Report when lateral deviation exceeds: ${formatCompactNumber(value / 8, 3)} nm`);
+      continue;
+    }
+
+    if (tag === 0x0B) {
+      request.intervalSecs = decodeADSReportingInterval(value, request.intervalSecs);
+      continue;
+    }
+
+    const label = adsPeriodicTagLabel(tag);
+    if (label) {
+      request.items.push(`${label}: every ${value} reports`);
     }
   }
 
@@ -1767,24 +2113,41 @@ function adsPeriodicTagLabel(tag){
     case 0x0E: return 'Earth reference data';
     case 0x0F: return 'Air reference data';
     case 0x10: return 'Meteo data';
+    case 0x11: return 'Airframe identification';
     default: return '';
   }
 }
 
 function decodeADSReportingInterval(value, fallbackSecs){
-  if (Number.isFinite(value) && value === 0) {
-    return 0;
-  }
-  if (Number.isFinite(value) && value > 0xBF) {
-    return (value - 0xBF) * 64;
-  }
-  if (Number.isFinite(value) && value > 0) {
-    return value * 64;
+  if (Number.isFinite(value)) {
+    const raw = Number(value) & 0xFF;
+    const rate = raw & 0x3F;
+    const scalingCode = (raw & 0xC0) >> 6;
+    let scalingFactor = scalingCode;
+    if (scalingCode === 2) scalingFactor = 8;
+    if (scalingCode === 3) scalingFactor = 64;
+    return scalingFactor * (rate + 1);
   }
   if (Number.isFinite(fallbackSecs) && fallbackSecs > 0) {
     return fallbackSecs;
   }
   return 0;
+}
+
+function decodeADSVerticalSpeedThreshold(value){
+  if (!Number.isFinite(value)) return '';
+  const raw = Number(value) & 0xFF;
+  const signed = raw & 0x80 ? raw - 0x100 : raw;
+  const threshold = Math.abs(signed * 64);
+  const comparator = signed >= 0 ? '>' : '<';
+  return `${comparator}${threshold} ft/min`;
+}
+
+function decodeADSContractAltitude(highByte, lowByte){
+  if (!Number.isFinite(highByte) || !Number.isFinite(lowByte)) return 0;
+  let raw = ((Number(highByte) & 0xFF) << 8) | (Number(lowByte) & 0xFF);
+  if (raw & 0x8000) raw -= 0x10000;
+  return raw * 4;
 }
 
 function hexToBytes(value){
@@ -1971,7 +2334,125 @@ function getDirectMarkerStyle(row){
   };
 }
 
-function formatWaypointPopupDetails(point){
+function getWaypointAggregateKey(point){
+  const coords = waypointCoords(point);
+  if (!coords) return '';
+
+  const pointName = String(point?.name || point?.waypoint || point?.position_name || '').trim();
+  return [
+    normaliseWaypointName(pointName),
+    coords.lat.toFixed(6),
+    coords.lon.toFixed(6),
+    String(point?.segment || '').trim()
+  ].join('|');
+}
+
+function getWaypointPointExtremes(point){
+  const layers = Array.isArray(point?.layers) && point.layers.length ? point.layers : [point];
+  let coldestTemp = null;
+  let fastestWind = null;
+
+  for (const layer of layers){
+    const temperature = coerceNum(layer?.temperature ?? layer?.temp);
+    const windSpeed = coerceNum(layer?.wind_speed ?? layer?.windSpeed);
+    if (Number.isFinite(temperature) && (!Number.isFinite(coldestTemp) || temperature < coldestTemp)) {
+      coldestTemp = temperature;
+    }
+    if (Number.isFinite(windSpeed) && (!Number.isFinite(fastestWind) || windSpeed > fastestWind)) {
+      fastestWind = windSpeed;
+    }
+  }
+
+  return { coldestTemp, fastestWind };
+}
+
+function getRouteWindWaypointExtremes(rows){
+  const coldestKeys = new Set();
+  const fastestKeys = new Set();
+  let minTemp = null;
+  let maxWind = null;
+
+  for (const row of rows || []){
+    const waypoints = getWaypointsFromRow(row);
+    for (const point of waypoints){
+      if (String(point?.segment || '').trim() !== 'route_wind') continue;
+
+      const key = String(point?._waypointKey || getWaypointAggregateKey(point) || '').trim();
+      if (!key) continue;
+
+      const pointExtremes = getWaypointPointExtremes(point);
+      if (Number.isFinite(pointExtremes.coldestTemp)) {
+        if (!Number.isFinite(minTemp) || pointExtremes.coldestTemp < minTemp) {
+          minTemp = pointExtremes.coldestTemp;
+          coldestKeys.clear();
+          coldestKeys.add(key);
+        } else if (pointExtremes.coldestTemp === minTemp) {
+          coldestKeys.add(key);
+        }
+      }
+
+      if (Number.isFinite(pointExtremes.fastestWind)) {
+        if (!Number.isFinite(maxWind) || pointExtremes.fastestWind > maxWind) {
+          maxWind = pointExtremes.fastestWind;
+          fastestKeys.clear();
+          fastestKeys.add(key);
+        } else if (pointExtremes.fastestWind === maxWind) {
+          fastestKeys.add(key);
+        }
+      }
+    }
+  }
+
+  return { coldestKeys, fastestKeys, minTemp, maxWind };
+}
+
+function getWaypointExtremeState(point, extremes){
+  const key = String(point?._waypointKey || getWaypointAggregateKey(point) || '').trim();
+  if (!key || !extremes || typeof extremes !== 'object') {
+    return { isColdest: false, isFastest: false };
+  }
+
+  return {
+    isColdest: !!(extremes.coldestKeys && extremes.coldestKeys.has(key)),
+    isFastest: !!(extremes.fastestKeys && extremes.fastestKeys.has(key))
+  };
+}
+
+function getWaypointMarkerStyle(point, extremes){
+  const baseStyle = { radius: 3, weight: 1, fillOpacity: 0.85 };
+  const state = getWaypointExtremeState(point, extremes);
+
+  if (state.isColdest && state.isFastest) {
+    return Object.assign({}, baseStyle, {
+      radius: 4,
+      weight: 2,
+      color: '#dc2626',
+      fillColor: '#3b82f6',
+      fillOpacity: 0.95
+    });
+  }
+  if (state.isColdest) {
+    return Object.assign({}, baseStyle, {
+      radius: 4,
+      weight: 2,
+      color: '#1d4ed8',
+      fillColor: '#60a5fa',
+      fillOpacity: 0.95
+    });
+  }
+  if (state.isFastest) {
+    return Object.assign({}, baseStyle, {
+      radius: 4,
+      weight: 2,
+      color: '#b91c1c',
+      fillColor: '#f87171',
+      fillOpacity: 0.95
+    });
+  }
+  return baseStyle;
+}
+
+function formatWaypointPopupDetails(point, extremeState){
   const pointName = String(point?.name || point?.waypoint || point?.position_name || '').trim();
   const segment = String(point?.segment || '').trim();
   const flightLevel = coerceNum(point?.flight_level ?? point?.flightLevel ?? point?.FL ?? point?.fl);
@@ -1989,6 +2470,11 @@ function formatWaypointPopupDetails(point){
   const pairs = [];
   if (segmentText) pairs.push(['Type', segmentText]);
   if (pointName) pairs.push(['Fix', pointName]);
+  const extremes = extremeState || { isColdest: false, isFastest: false };
+  const extremeLabels = [];
+  if (extremes.isColdest) extremeLabels.push('Coldest point');
+  if (extremes.isFastest) extremeLabels.push('Fastest wind');
+  if (extremeLabels.length) pairs.push(['Extreme', extremeLabels.join(' • ')]);
   if (layers.length) {
     layers.sort((left, right) => {
       const a = coerceNum(left?.flight_level) ?? -1;
@@ -2073,6 +2559,7 @@ function openMapRows(pts, titleText, openFirstPopup){
 
   const labeledTails = new Set();
   let firstPopupMarker = null;
+  const waypointExtremes = getRouteWindWaypointExtremes(pts);
 
   function getFlightLevelTextFromAny(obj){
     const flRaw = (obj?.flight_level ?? obj?.flightLevel ?? obj?.FL ?? obj?.fl ?? null);
@@ -2253,7 +2740,8 @@ function openMapRows(pts, titleText, openFirstPopup){
 
       const latlng = [lat, lon];
       allLatLngs.push(latlng);
-      const cm = L.circleMarker(latlng, { radius: 3, weight: 1, fillOpacity: 0.85 });
+  const waypointExtremeState = getWaypointExtremeState(p, waypointExtremes);
+  const cm = L.circleMarker(latlng, getWaypointMarkerStyle(p, waypointExtremes));
 
       addTailLabel(latlng, tailLabel, getFlightLevelTextForRow(r));
       addFLLabel(latlng, getFlightLevelTextForPoint(p, r));
@@ -2263,7 +2751,7 @@ function openMapRows(pts, titleText, openFirstPopup){
         `<div style="max-width:560px">
           <div class="nowrap"><b>${escapeHtml(r.tail || '')}</b> • ${escapeHtml(pointName)} • ${escapeHtml(r.label || '')}</div>
           <div class="kvmini" style="margin:4px 0 8px 0">${escapeHtml(formatTimestamp(r.timestamp))} • ${escapeHtml(coordStr(lat, lon))}</div>
-          ${formatWaypointPopupDetails(p)}
+          ${formatWaypointPopupDetails(p, waypointExtremeState)}
          </div>`;
       cm.bindPopup(popupHtml, {maxWidth: 9999, maxHeight: 9999, className: 'big-popup'});
       cm.addTo(allLayer);
@@ -2317,7 +2805,37 @@ function openMapForRow(r){
 function waypointCoords(point){
   const lat = coerceNum(point && (point.latitude ?? point.lat));
   const lon = coerceNum(point && (point.longitude ?? point.lon));
-  if (!(isNum(lat) && isNum(lon))) return null;
+  if (isNum(lat) && isNum(lon)) return { lat, lon };
+
+  const compactName = String(point?.name || point?.waypoint || point?.position_name || '').trim().toUpperCase();
+  const compactCoords = parseCompactWaypointCoords(compactName);
+  if (compactCoords) return compactCoords;
+
+  return null;
+}
+
+function parseCompactWaypointCoords(value){
+  if (!/^[NS]\d{5}[EW]\d{6}$/.test(String(value || '').trim().toUpperCase())) return null;
+
+  const text = String(value).trim().toUpperCase();
+  const latDir = text[0];
+  const lonDir = text[6];
+  const latDigits = text.slice(1, 6);
+  const lonDigits = text.slice(7, 13);
+
+  const latDegrees = Number(latDigits.slice(0, 2));
+  const latMinutes = Number(latDigits.slice(2, 4));
+  const latTenths = Number(latDigits.slice(4, 5));
+  const lonDegrees = Number(lonDigits.slice(0, 3));
+  const lonMinutes = Number(lonDigits.slice(3, 5));
+  const lonTenths = Number(lonDigits.slice(5, 6));
+
+  if (![latDegrees, latMinutes, latTenths, lonDegrees, lonMinutes, lonTenths].every(Number.isFinite)) return null;
+
+  let lat = latDegrees + ((latMinutes + latTenths / 10) / 60);
+  let lon = lonDegrees + ((lonMinutes + lonTenths / 10) / 60);
+  if (latDir === 'S') lat = -lat;
+  if (lonDir === 'W') lon = -lon;
   return { lat, lon };
 }
 
@@ -2428,21 +2946,16 @@ function aggregateWaypointPoints(points){
   for (let index = 0; index < points.length; index++){
     const point = points[index];
     const coords = waypointCoords(point);
-    if (!coords) continue;
-
     const pointName = String(point?.name || point?.waypoint || point?.position_name || '').trim();
-    const key = [
-      normaliseWaypointName(pointName),
-      coords.lat.toFixed(6),
-      coords.lon.toFixed(6),
-      String(point?.segment || '').trim()
-    ].join('|');
+    const key = getWaypointAggregateKey(point);
+    if (!coords || !key) continue;
 
     if (!grouped.has(key)){
       const base = Object.assign({}, point, {
         latitude: coords.lat,
         longitude: coords.lon,
         name: point?.name || point?.waypoint || pointName,
+        _waypointKey: key,
         layers: [],
         _order: index
       });
@@ -2575,7 +3088,34 @@ function renderPage(){
     tdTs.className = 'tscell';
     tdTs.innerHTML = `<div class="tsmain">${escapeHtml(formatTimestamp(r.timestamp))}</div>`;
     const tdTail = document.createElement('td'); tdTail.textContent = r.tail || '';
-    const tdFlight = document.createElement('td'); tdFlight.textContent = flightDisplay;
+    const tdFlight = document.createElement('td');
+    const routeDisplay = getRouteDisplayState(r);
+    const routeValue = routeDisplay.routeValue;
+    const routeUpdatedAt = routeDisplay.routeUpdatedAt;
+    if (flightDisplay || routeValue || routeUpdatedAt){
+      const flightWrap = document.createElement('div');
+      if (flightDisplay){
+        const flightMain = document.createElement('div');
+        flightMain.className = 'routecell-main';
+        flightMain.textContent = flightDisplay;
+        flightWrap.appendChild(flightMain);
+      }
+      if (routeValue){
+        const routeMain = document.createElement('div');
+        routeMain.className = routeDisplay.routeMismatch ? 'routecell-sub routecell-alert' : 'routecell-sub';
+        routeMain.textContent = routeValue;
+        flightWrap.appendChild(routeMain);
+      }
+      if (routeUpdatedAt){
+        const routeSub = document.createElement('div');
+        routeSub.className = routeDisplay.isUnixLikeUpdateTime ? 'routecell-sub routecell-alert' : 'routecell-sub';
+        routeSub.textContent = routeUpdatedAt;
+        flightWrap.appendChild(routeSub);
+      }
+      tdFlight.appendChild(flightWrap);
+    } else {
+      tdFlight.innerHTML = '<span class="kvmini">—</span>';
+    }
     const tdLbl = document.createElement('td'); tdLbl.innerHTML = `<span class="pill">${escapeHtml(r.label||'')}</span>`;
     const tdT = document.createElement('td'); tdT.innerHTML = `<span class="type">${escapeHtml(r.type||'')}</span>`;
     const tdC = document.createElement('td'); tdC.textContent = coordStr(r.lat, r.lon);
@@ -2661,7 +3201,7 @@ document.getElementById('waypointsFile').addEventListener('change', async (ev) =
   }
 });
 
-for (const id of ['q','label','type','onlyCoords','pageSize']){
+for (const id of ['q','label','type','onlyCoords','onlyFlight','pageSize']){
   document.getElementById(id).addEventListener('input', () => { page = 0; recomputeFilterAndRender(); });
   document.getElementById(id).addEventListener('change', () => { page = 0; recomputeFilterAndRender(); });
 }
@@ -2671,13 +3211,16 @@ document.getElementById('reset').addEventListener('click', () => {
   document.getElementById('label').value = '';
   document.getElementById('type').value = '';
   document.getElementById('onlyCoords').checked = false;
+  document.getElementById('onlyFlight').checked = false;
   document.getElementById('pageSize').value = '100';
   page = 0;
   recomputeFilterAndRender();
 });
 
+document.getElementById('thTimestamp').addEventListener('click', () => toggleSort('timestamp'));
 document.getElementById('thTail').addEventListener('click', () => toggleSort('tail'));
 document.getElementById('thFlight').addEventListener('click', () => toggleSort('flight'));
+document.getElementById('thDetails').addEventListener('click', () => toggleSort('details'));
 updateSortHeaders();
 
 document.getElementById('prev').addEventListener('click', () => { page--; clampPage(); renderPage(); });

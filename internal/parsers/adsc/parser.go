@@ -123,7 +123,7 @@ func (p *Parser) Labels() []string { return []string{"B6", "A6"} }
 func (p *Parser) Priority() int    { return 10 }
 
 func (p *Parser) QuickCheck(text string) bool {
-	return strings.Contains(text, ".ADS.")
+	return strings.Contains(text, ".ADS")
 }
 
 func (p *Parser) Parse(msg *acars.Message) registry.Result {
@@ -138,8 +138,9 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 		Timestamp: msg.Timestamp,
 	}
 
-	// Find .ADS. marker.
-	adsIdx := strings.Index(text, ".ADS.")
+	// Find ADS-C marker. Some feeds use ".ADS." while others omit the
+	// separator before the registration, e.g. ".ADSRPC777...".
+	adsIdx := strings.Index(text, ".ADS")
 	if adsIdx < 0 {
 		return nil
 	}

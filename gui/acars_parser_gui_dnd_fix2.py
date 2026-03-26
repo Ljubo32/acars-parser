@@ -9,7 +9,9 @@ import os
 import threading
 import subprocess
 import json
+import sqlite3
 import tempfile
+import re
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -56,6 +58,226 @@ def _split_dnd_files(data: str):
 
 BaseTk = TkinterDnD.Tk if _HAS_DND else tk.Tk  # type: ignore[attr-defined]
 
+_FLIGHT_CODE_RE = re.compile(r"^([A-Z-]+)(\d+)([A-Z]?)$", re.IGNORECASE)
+_ROUTE_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "flightroute.sqb")
+
+
+def _normalise_flight_code(value):
+    """Return a stable flight key that matches the viewer's displayed flight code."""
+    if not isinstance(value, str):
+        return ""
+    trimmed = value.strip().upper()
+    if not trimmed:
+        return ""
+
+    match = _FLIGHT_CODE_RE.match(trimmed)
+    if not match:
+        return trimmed
+
+    prefix, digits, suffix = match.groups()
+    return f"{prefix}{int(digits)}{suffix or ''}"
+
+
+def _extract_route_lookup_key(item):
+    """Extract the primary flight key used for route lookup."""
+    if not isinstance(item, dict):
+        return ""
+
+    candidates = [
+        item.get("flight"),
+        item.get("flight_id"),
+        item.get("flightId"),
+        item.get("adsc_flight_id"),
+    ]
+
+    message = item.get("message")
+    if isinstance(message, dict):
+        candidates.extend([
+            message.get("flight"),
+            message.get("flight_id"),
+            message.get("flightId"),
+            message.get("adsc_flight_id"),
+        ])
+
+    results = item.get("results")
+    if isinstance(results, list):
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            candidates.extend([
+                result.get("flight"),
+                result.get("flight_id"),
+                result.get("flightId"),
+                result.get("adsc_flight_id"),
+            ])
+
+    for candidate in candidates:
+        key = _normalise_flight_code(candidate)
+        if key:
+            return key
+
+    return ""
+
+
+def _select_newer_route_lookup(current, candidate):
+    """Keep the newest route row for a normalised flight key."""
+    if current is None:
+        return candidate
+
+    current_updated = str(current.get("updatetime") or "").strip()
+    candidate_updated = str(candidate.get("updatetime") or "").strip()
+
+    current_key = (1, current_updated)
+    candidate_key = (1, candidate_updated)
+    if current_updated.isdigit():
+        current_key = (2, int(current_updated))
+    if candidate_updated.isdigit():
+        candidate_key = (2, int(candidate_updated))
+
+    if candidate_key > current_key:
+        return candidate
+
+    return current
+
+
+def _read_route_lookup_batch(conn, flights, batch_size=500):
+    """Read the newest route rows for a set of normalised flight keys."""
+    pending = [flight for flight in flights if flight]
+    if not pending:
+        return {}
+
+    results = {}
+
+    def _apply_rows(rows):
+        for row in rows:
+            route = str(row[1] or "").strip()
+            updated_at = str(row[2] or "").strip()
+            if not route and not updated_at:
+                continue
+
+            lookup = {
+                "flight": str(row[0] or "").strip(),
+                "route": route,
+                "updatetime": updated_at,
+            }
+            key = _normalise_flight_code(lookup["flight"])
+            if not key:
+                continue
+            results[key] = _select_newer_route_lookup(results.get(key), lookup)
+
+    for start in range(0, len(pending), batch_size):
+        batch = pending[start:start + batch_size]
+        placeholders = ",".join("?" for _ in batch)
+
+        exact_rows = conn.execute(
+            f"""
+            SELECT flight, route, updatetime
+            FROM FlightRoute
+            WHERE flight IN ({placeholders})
+            ORDER BY flight, updatetime DESC
+            """,
+            batch,
+        ).fetchall()
+        _apply_rows(exact_rows)
+
+        missing = [flight for flight in batch if flight not in results]
+        if not missing:
+            continue
+
+        fallback_placeholders = ",".join("?" for _ in missing)
+        fallback_rows = conn.execute(
+            f"""
+            SELECT flight, route, updatetime
+            FROM FlightRoute
+            WHERE UPPER(TRIM(flight)) IN ({fallback_placeholders})
+            ORDER BY UPPER(TRIM(flight)), updatetime DESC
+            """,
+            missing,
+        ).fetchall()
+        _apply_rows(fallback_rows)
+
+    return results
+
+
+def _read_route_lookup(conn, flight):
+    return _read_route_lookup_batch(conn, [flight]).get(flight)
+
+
+def _enrich_payload_with_routes(payload, logger):
+    """Augment JSON rows with route data from the local SQLite lookup."""
+    if not isinstance(payload, list):
+        logger("[INFO] Route lookup skipped; JSON output is not a list.\n")
+        return False
+    if not payload:
+        logger("[INFO] Route lookup skipped; JSON output is empty.\n")
+        return False
+    if not os.path.exists(_ROUTE_DB_PATH):
+        logger(f"[INFO] Route lookup skipped; database not found: {_ROUTE_DB_PATH}\n")
+        return False
+
+    flights = []
+    seen = set()
+    for item in payload:
+        flight = _extract_route_lookup_key(item)
+        if not flight or flight in seen:
+            continue
+        seen.add(flight)
+        flights.append(flight)
+
+    if not flights:
+        logger("[INFO] Route lookup skipped; no flight codes found in JSON output.\n")
+        return False
+
+    try:
+        conn = sqlite3.connect(_ROUTE_DB_PATH)
+    except Exception as exc:
+        logger(f"[WARN] Route lookup skipped; failed to open database: {exc}\n")
+        return False
+
+    matched = 0
+    try:
+        cache = _read_route_lookup_batch(conn, flights)
+        for item in payload:
+            flight = _extract_route_lookup_key(item)
+            route_lookup = cache.get(flight)
+            if route_lookup:
+                item["route_lookup"] = route_lookup
+                matched += 1
+    except Exception as exc:
+        logger(f"[WARN] Route lookup failed: {exc}\n")
+        return False
+    finally:
+        conn.close()
+
+    logger(f"[INFO] Route lookup matched {matched} row(s) using {_ROUTE_DB_PATH}.\n")
+    return True
+
+
+def _enrich_json_output_with_routes(output_path, logger, pretty=False):
+    """Augment a JSON output file with route data from the local SQLite lookup."""
+    if not os.path.exists(output_path):
+        return
+
+    try:
+        with open(output_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception as exc:
+        logger(f"[WARN] Route lookup skipped; failed to read JSON output: {exc}\n")
+        return
+
+    if not _enrich_payload_with_routes(payload, logger):
+        return
+
+    try:
+        with open(output_path, "w", encoding="utf-8") as f:
+            if pretty:
+                json.dump(payload, f, indent=2)
+            else:
+                json.dump(payload, f, separators=(",", ":"))
+            f.write("\n")
+    except Exception as exc:
+        logger(f"[WARN] Route lookup failed while writing JSON output: {exc}\n")
+
 
 class App(BaseTk):
     def __init__(self):
@@ -70,6 +292,7 @@ class App(BaseTk):
         self.all_var = tk.BooleanVar(value=True)
         self.stats_var = tk.BooleanVar(value=False)
         self.merge_var = tk.BooleanVar(value=False)
+        self.route_lookup_var = tk.BooleanVar(value=True)
 
         self._build_ui()
 
@@ -107,6 +330,8 @@ class App(BaseTk):
         ttk.Checkbutton(row3, text="All (-all)", variable=self.all_var).pack(side="left", padx=(10, 0))
         ttk.Checkbutton(row3, text="Stats (-stats) if supported", variable=self.stats_var).pack(side="left", padx=(10, 0))
         ttk.Checkbutton(row3, text="Merge outputs into one file", variable=self.merge_var).pack(side="left", padx=(10, 0))
+        self.route_lookup_check = ttk.Checkbutton(row3, text="Route lookup from flightroute.sqb", variable=self.route_lookup_var)
+        self.route_lookup_check.pack(side="left", padx=(10, 0))
         ttk.Button(row3, text="Add files…", command=self.add_files).pack(side="right")
         ttk.Button(row3, text="Run Extract (queue)", command=self.run_queue).pack(side="right", padx=(0, 8))
 
@@ -335,6 +560,9 @@ class App(BaseTk):
 
         try:
             if output_format == "json":
+                if self.route_lookup_var.get():
+                    self._append("[INFO] Applying route lookup to the merged JSON...\n")
+                    _enrich_payload_with_routes(merged_json, self._append)
                 with open(merged_output, "w", encoding="utf-8") as f:
                     if self.pretty_var.get():
                         json.dump(merged_json, f, indent=2)
@@ -346,7 +574,6 @@ class App(BaseTk):
                     content = "\n\n".join(part for part in merged_text_parts if part)
                     if content:
                         f.write(content + "\n")
-
             self._append(f"\n[OK] Merged output written: {merged_output}\n")
         except Exception as e:
             self._append(f"\n[ERROR] Failed to write merged output: {e}\n")
@@ -356,6 +583,7 @@ class App(BaseTk):
         if not is_json:
             self.pretty_var.set(False)
         self.pretty_check.configure(state="normal" if is_json else "disabled")
+        self.route_lookup_check.configure(state="normal" if is_json else "disabled")
 
     def run_queue(self):
         exe = self.exe_var.get().strip()
@@ -400,6 +628,8 @@ class App(BaseTk):
                 rc, _combined = self._run_extract_process(args, creationflags)
 
                 if rc == 0 and os.path.exists(outp):
+                    if output_format == "json" and self.route_lookup_var.get():
+                        _enrich_json_output_with_routes(outp, self._append, pretty=self.pretty_var.get())
                     self._append(f"[OK] Output: {outp}\n")
                 else:
                     self._append(f"[FAIL] Exit code: {rc}\n")

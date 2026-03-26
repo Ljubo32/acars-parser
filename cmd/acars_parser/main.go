@@ -38,6 +38,9 @@ var (
 	pdcOriginHeaderRe = regexp.MustCompile(`(?s)/[A-Z]+\.[A-Z0-9]+/[A-Z]+\s+\d{4}\s+\d{6}\s+([A-Z]{4})\b`)
 	pdcDestinationRe  = regexp.MustCompile(`\bCLRD\s+TO\s+([A-Z]{4})\b`)
 	fsmHeaderRe       = regexp.MustCompile(`(?s)/[A-Z]+\.[A-Z0-9]+/FSM\s+\d{4}\s+\d{6}\s+([A-Z]{4})\s+([A-Z0-9]{3,8})\b`)
+	iniMetadataRe     = regexp.MustCompile(`(?i)INI(\d{2})(\d{2})(\d{4})\s+([A-Z]{3}\d{1,4}[A-Z]?)\s*/\d{2}/([A-Z]{4})/([A-Z]{4})\b`)
+	raFlightNumberRe  = regexp.MustCompile(`\bFLIGHT\s+NUMBER:\s*([A-Z0-9]{2,10}(?:/[A-Z0-9]{2,10})?)\b`)
+	raSectorRe        = regexp.MustCompile(`\bSECTOR:\s*([A-Z]{4})-([A-Z]{4})\b`)
 )
 
 type ExtractOut struct {
@@ -541,6 +544,30 @@ func enrichMessageFromText(msg *acars.Message) {
 		flightNumber = parseFPNFlightFromText(msg.Text)
 	}
 	if flightNumber == "" || destinationAirport == "" || departingAirport == "" {
+		iniFlightNumber, iniDepartingAirport, iniDestinationAirport := parseINIMetadataFromText(msg.Text)
+		if flightNumber == "" {
+			flightNumber = iniFlightNumber
+		}
+		if departingAirport == "" {
+			departingAirport = iniDepartingAirport
+		}
+		if destinationAirport == "" {
+			destinationAirport = iniDestinationAirport
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(msg.Label), "RA") && (flightNumber == "" || destinationAirport == "" || departingAirport == "") {
+		raFlightNumber, raDepartingAirport, raDestinationAirport := parseRAFlightMetadataFromText(msg.Text)
+		if flightNumber == "" {
+			flightNumber = raFlightNumber
+		}
+		if departingAirport == "" {
+			departingAirport = raDepartingAirport
+		}
+		if destinationAirport == "" {
+			destinationAirport = raDestinationAirport
+		}
+	}
+	if flightNumber == "" || destinationAirport == "" || departingAirport == "" {
 		pdcFlightNumber, pdcDepartingAirport, pdcDestinationAirport := parsePDCMetadataFromText(msg.Text)
 		if flightNumber == "" {
 			flightNumber = pdcFlightNumber
@@ -694,6 +721,57 @@ func parseFSMMetadataFromText(text string) (flightNumber string, departingAirpor
 	}
 
 	return flightNumber, departingAirport
+}
+
+func parseINIMetadataFromText(text string) (flightNumber string, departingAirport string, destinationAirport string) {
+	text = strings.TrimSpace(strings.ToUpper(text))
+	if text == "" || !strings.Contains(text, "INI01") {
+		return "", "", ""
+	}
+
+	match := iniMetadataRe.FindStringSubmatch(text)
+	if len(match) != 7 {
+		return "", "", ""
+	}
+
+	flightNumber = strings.TrimSpace(match[4])
+	departingAirport = strings.TrimSpace(match[5])
+	destinationAirport = strings.TrimSpace(match[6])
+	if len(departingAirport) != 4 || len(destinationAirport) != 4 || flightNumber == "" {
+		return "", "", ""
+	}
+
+	return flightNumber, departingAirport, destinationAirport
+}
+
+func parseRAFlightMetadataFromText(text string) (flightNumber string, departingAirport string, destinationAirport string) {
+	text = strings.TrimSpace(strings.ToUpper(text))
+	if text == "" || !strings.Contains(text, "FLIGHT NUMBER:") {
+		return "", "", ""
+	}
+
+	if match := raFlightNumberRe.FindStringSubmatch(text); len(match) == 2 {
+		flightNumber = strings.TrimSpace(match[1])
+		if strings.Contains(flightNumber, "/") {
+			parts := strings.SplitN(flightNumber, "/", 2)
+			if len(parts) == 2 && strings.TrimSpace(parts[1]) != "" {
+				flightNumber = strings.TrimSpace(parts[1])
+			} else {
+				flightNumber = strings.TrimSpace(parts[0])
+			}
+		}
+	}
+
+	if match := raSectorRe.FindStringSubmatch(text); len(match) == 3 {
+		departingAirport = strings.TrimSpace(match[1])
+		destinationAirport = strings.TrimSpace(match[2])
+	}
+
+	if flightNumber == "" {
+		return "", "", ""
+	}
+
+	return flightNumber, departingAirport, destinationAirport
 }
 
 func newOutputMessage(msg *acars.Message) *OutputMessage {
