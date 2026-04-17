@@ -61,6 +61,8 @@ When that rendered `route` value is in the ICAO `XXXX-XXXX` format and it does n
 
 The viewer now always shows a `raw text` details block for non-empty ACARS payload text, including single-line messages. That block no longer relies on any symbol-limit style truncation in the details panel; instead it wraps long lines to the available panel width.
 
+The main `Summary / Details` column in the HTML viewer also no longer truncates the summary text to a fixed 500-character limit for normal row rendering paths. Long summaries now rely on the existing word wrap in that column instead of being cut off.
+
 ### extract
 
 Extracts structured data from JSONL files and JAERO TXT logs containing ACARS messages.
@@ -81,7 +83,7 @@ For PDC-style clearances, including label `A3` payloads such as `/...DC1/CLD ...
 
 For label `A4` `FS1/FSM` payloads such as `/CDGATYA.FS1/FSM 0546 260314 LFPG SV0143 ...`, the extractor also populates `message.flight` and `message.departing_airport` from the raw message text. Two-character IATA airline prefixes continue to be normalised in the backend to their ICAO equivalents, so values such as `SV0143` become `SVA143` and `AY99` becomes `FIN99` in the emitted JSON.
 
-For CPDLC label `AA` and `BA` payloads, the backend now preserves richer structured element data for contact and monitor instructions, connection-management payloads, full facility names, facility designations, facility functions, frequencies, free-text elements, TP4 table values, and header timestamp seconds when present. The uplink decoder now also preserves compound climb/descent target data for `uM26` to `uM29`, so instructions such as `CLIMB TO REACH [altitude] BY [time]` retain structured altitude and time or position values instead of collapsing to the bare label template.
+For CPDLC label `AA` and `BA` payloads, the backend now preserves richer structured element data for contact and monitor instructions, connection-management payloads, full facility names, facility designations, facility functions, frequencies, free-text elements, TP4 table values, and header timestamp seconds when present. The uplink decoder now also preserves compound climb/descent target data for `uM26` to `uM29`, so instructions such as `CLIMB TO REACH [altitude] BY [time]` retain structured altitude and time or position values instead of collapsing to the bare label template. Route-clearance uplinks now also tolerate the short empty `route_info_additional` tail encoding seen in some FANS-1/A messages, which prevents later CPDLC elements from being swallowed into the first clearance element.
 
 For ADS-C label `A6` contract requests, the backend now decodes periodic reporting intervals from the actual request tag encoding instead of treating the third payload byte as a raw `* 64` modulus. This fixes periodic intervals such as `0xD9 -> 1664 seconds` and `0x00 -> 0 seconds`. The emitted `contract_request` JSON also now includes a `kind` and structured `groups` entries for periodic and event request tags such as reporting interval, report moduli, aircraft-intent projection time, lateral-deviation thresholds, vertical-speed thresholds, altitude ranges, and waypoint-change triggers.
 
@@ -94,6 +96,8 @@ For nested `dumphfdl` JSON lines carrying HFDL `hfnpdu` data types such as `Freq
 The compact H1 `EB00` and `SB01` parsers now also emit `msg_type: "EBSB"` in their parsed JSON results while keeping their existing parser identities unchanged.
 
 The HTML viewer also gives `hfdl_data` rows a dedicated summary, parsed-details block, and map popup so `hfnpdu_type`, `flight_id`, ICAO address, ground station, synthetic HFDL text, and coordinates are readable without digging through the flattened raw JSON. On the map, direct HFDL points also use a distinct teal marker so they stand out from the generic ACARS position markers.
+
+For H2 wind messages that begin with `02A` or `02D`, the backend now parses the short start-position wind blocks before the coordinate-bearing points as structured `initial_layers` instead of misreading them as flight levels. Each layer preserves the altitude in feet, a converted altitude in metres, signed temperature in Celsius with one decimal place, and wind direction and speed with a derived km/h value. In the HTML viewer map popup, those `initial_layers` are shown only on the direct start-position marker for the H2 row, while the later coordinate-bearing route points keep their own shorter per-point wind displays. Route-point popups in the HTML viewer now also display altitude in metres alongside flight levels for H2 wind messages.
 
 When the input contains `message.flight` with a leading two-character IATA airline designator from the embedded mapping followed by digits, the emitted JSON normalises that value to the matching three-letter ICAO airline code. This includes alphanumeric designators such as `2C -> CMA` and `2G -> HUA`. The backend also strips leading zeros from the numeric part of `flight` values, so `AEE01BS` becomes `AEE1BS`. The `flight_id` field is preserved as received.
 
@@ -245,7 +249,7 @@ Extracts flight number, origin/destination, runway, SID, squawk code, and freque
 Parses route messages containing callsign, origin/destination airports (IATA/ICAO), and scheduling data.
 
 ### Label 16 Position
-Parses classic waypoint position reports and `POSA` position reports with coordinates, flight level, waypoint ETAs, temperature, wind, fuel on board, and Mach number.
+Parses classic waypoint position reports, `POSA` position reports, and multiline `POS02` position reports. `POS02` parsing now extracts the flight, start date, end date, header message time, an ICAO origin-destination route in `XXXX-XXXX` format, coordinates, altitude in feet, derived flight level, Mach number, and outside-air temperature while classifying the parsed result with `message_type: "pos"`.
 
 ### ILNGE7X Summary
 Parses `/ILNGE7X.` summary messages and extracts the tail, flight, take-off date/time, and origin-destination route. The parsed JSON result also emits `msg_type: "ILNGE"`.

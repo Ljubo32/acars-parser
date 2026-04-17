@@ -2172,9 +2172,25 @@ func (d *Decoder) decodeRouteClearance() (*RouteClearance, error) {
 	}
 
 	if hasRouteInfoAdditional {
-		// FANSRouteInformationAdditional is a variable length IA5 string.
 		off := d.br.Offset()
-		length, err := d.br.ReadConstrainedInt(1, 256)
+
+		// Some aircraft encode an empty route-info-additional tail as a short
+		// zero-length field. Treat that as present-but-empty and stop here.
+		length, err := d.br.ReadConstrainedInt(0, 63)
+		if err == nil {
+			if length == 0 {
+				return rc, nil
+			}
+			text, textErr := d.decodeIA5String(length)
+			if textErr == nil && isLikelyRouteInfoAdditional(text) {
+				rc.RouteInfoAdditional = text
+				return rc, nil
+			}
+			_ = d.br.SetOffset(off)
+		}
+
+		// Fallback for longer IA5-string encodings seen in other samples.
+		length, err = d.br.ReadConstrainedInt(1, 256)
 		if err != nil {
 			_ = d.br.SetOffset(off)
 			return rc, nil
@@ -2184,10 +2200,38 @@ func (d *Decoder) decodeRouteClearance() (*RouteClearance, error) {
 			_ = d.br.SetOffset(off)
 			return rc, nil
 		}
+		if !isLikelyRouteInfoAdditional(text) {
+			_ = d.br.SetOffset(off)
+			return rc, nil
+		}
 		rc.RouteInfoAdditional = text
 	}
 
 	return rc, nil
+}
+
+func isLikelyRouteInfoAdditional(text string) bool {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return false
+	}
+	hasMeaningful := false
+	for _, ch := range text {
+		if ch < 32 || ch > 126 {
+			return false
+		}
+		isUpper := ch >= 'A' && ch <= 'Z'
+		isDigit := ch >= '0' && ch <= '9'
+		isSeparator := ch == ' ' || ch == '/' || ch == '-' || ch == '.' || ch == '+' || ch == '('
+		isSeparator = isSeparator || ch == ')' || ch == ','
+		if !isUpper && !isDigit && !isSeparator {
+			return false
+		}
+		if isUpper || isDigit {
+			hasMeaningful = true
+		}
+	}
+	return hasMeaningful
 }
 
 type routeInformationCandidate struct {

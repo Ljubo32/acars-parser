@@ -2,6 +2,7 @@
 package h2wind
 
 import (
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -37,6 +38,17 @@ type WindLayer struct {
 	Gusting     bool `json:"-"`
 }
 
+// InitialWindLayer represents a short 02A/02D start-position layer block.
+type InitialWindLayer struct {
+	AltitudeFeet   int     `json:"altitude_feet"`
+	AltitudeMetres int     `json:"altitude_metres"`
+	TemperatureC   float64 `json:"temperature_c"`
+	WindDirDeg     int     `json:"wind_dir_deg,omitempty"`
+	WindSpeedKt    int     `json:"wind_speed_kt,omitempty"`
+	WindSpeedKmh   int     `json:"wind_speed_kmh,omitempty"`
+	Gusting        bool    `json:"-"`
+}
+
 // WindPoint represents wind/weather at a specific (lat,lon) along a route.
 //
 // H2 examples:
@@ -57,22 +69,23 @@ type WindPoint struct {
 
 // Result represents a parsed H2 wind/weather report.
 type Result struct {
-	MsgID           int64       `json:"message_id"`
-	Timestamp       string      `json:"timestamp"`
-	MsgType         string      `json:"msg_type,omitempty"`
-	Tail            string      `json:"tail,omitempty"`
-	Phase           string      `json:"phase,omitempty"` // 02A climb/descend, 02E cruise
-	Day             int         `json:"day,omitempty"`   // only for 02E (2-digit day)
-	Origin          string      `json:"origin,omitempty"`
-	Destination     string      `json:"destination,omitempty"`
-	OriginName      string      `json:"origin_name,omitempty"`
-	DestinationName string      `json:"destination_name,omitempty"`
-	Latitude        float64     `json:"latitude,omitempty"`
-	Longitude       float64     `json:"longitude,omitempty"`
-	ReportTime      string      `json:"report_time,omitempty"`
-	WindLayers      []WindLayer `json:"wind_layers,omitempty"`
-	Points          []WindPoint `json:"points,omitempty"`
-	RawData         string      `json:"raw_data,omitempty"`
+	MsgID           int64              `json:"message_id"`
+	Timestamp       string             `json:"timestamp"`
+	MsgType         string             `json:"msg_type,omitempty"`
+	Tail            string             `json:"tail,omitempty"`
+	Phase           string             `json:"phase,omitempty"` // 02A climb/descend, 02E cruise
+	Day             int                `json:"day,omitempty"`   // only for 02E (2-digit day)
+	Origin          string             `json:"origin,omitempty"`
+	Destination     string             `json:"destination,omitempty"`
+	OriginName      string             `json:"origin_name,omitempty"`
+	DestinationName string             `json:"destination_name,omitempty"`
+	Latitude        float64            `json:"latitude,omitempty"`
+	Longitude       float64            `json:"longitude,omitempty"`
+	ReportTime      string             `json:"report_time,omitempty"`
+	InitialLayers   []InitialWindLayer `json:"initial_layers,omitempty"`
+	WindLayers      []WindLayer        `json:"wind_layers,omitempty"`
+	Points          []WindPoint        `json:"points,omitempty"`
+	RawData         string             `json:"raw_data,omitempty"`
 }
 
 func (r *Result) Type() string     { return "h2_wind" }
@@ -91,7 +104,7 @@ func (p *Parser) Priority() int    { return 100 }
 
 func (p *Parser) QuickCheck(text string) bool {
 	text = strings.TrimSpace(text)
-	return (strings.HasPrefix(text, "02A") || strings.HasPrefix(text, "02E")) && len(text) > 25
+	return (strings.HasPrefix(text, "02A") || strings.HasPrefix(text, "02D") || strings.HasPrefix(text, "02E")) && len(text) > 25
 }
 
 func (p *Parser) Parse(msg *acars.Message) registry.Result {
@@ -107,12 +120,12 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 	text := strings.TrimSpace(msg.Text)
 
 	// Check for encoded/binary messages (not parseable).
-	if !(strings.HasPrefix(text, "02A") || strings.HasPrefix(text, "02E")) {
+	if !(strings.HasPrefix(text, "02A") || strings.HasPrefix(text, "02D") || strings.HasPrefix(text, "02E")) {
 		return nil
 	}
 
 	match := compiler.Parse(text)
-	if match == nil || (match.FormatName != "h2_header_02A" && match.FormatName != "h2_header_02E") {
+	if match == nil || (match.FormatName != "h2_header_02A" && match.FormatName != "h2_header_02D" && match.FormatName != "h2_header_02E") {
 		return nil
 	}
 
@@ -137,13 +150,17 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 	switch match.FormatName {
 	case "h2_header_02A":
 		result.Phase = "02A"
+		fallthrough
+	case "h2_header_02D":
+		if result.Phase == "" {
+			result.Phase = "02D"
+		}
 		// 02A header length: 02A + time(6) + origin(4) + dest(4) + lat_dir(1) + lat(5) + lon_dir(1) + lon(6) + datetime(6) = 36
 		headerLen := 36
 		if headerLen < len(text) {
 			rest := text[headerLen:]
 			result.RawData = strings.TrimSpace(rest)
-			// Old-style vertical layers (kept for backwards compatibility)
-			result.WindLayers = parseWindLayers(compiler, rest)
+			result.InitialLayers = parseInitialLayers02AD(rest)
 			// Newer route/point blocks beginning with N/S (no ETA)
 			result.Points = append(result.Points, parseRoutePoints02A(rest)...)
 		}
@@ -228,6 +245,22 @@ func parseTemp10(sign, tempStr string) float64 {
 	return out
 }
 
+func feetToMetres(feet int) int {
+	return int(math.Round(float64(feet) * 0.3048))
+}
+
+func knotsToKmh(knots int) int {
+	return int(math.Round(float64(knots) * 1.852))
+}
+
+func parseInitialAltitudeFeet(value string) (int, error) {
+	altitude, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, err
+	}
+	return altitude * 10, nil
+}
+
 func headerLen02E(text string) int {
 	// 02E + day(2) + origin(4) + dest(4) + lat_dir(1) + lat(5) + lon_dir(1) + lon(6)
 	// + eta(4) + fl(3-4) + sign(1) + temp(3) + wind_dir(3) + wind_spd(3) + gust(optional)
@@ -286,11 +319,51 @@ func buildPointFrom02EHeader(c map[string]string) (WindPoint, bool) {
 }
 
 var (
+	// 02A/02D start layers: ALT(ft) + temp sign + temp(tenths C) + optional wind dir/speed + optional G.
+	reInitialLayer02AD = regexp.MustCompile(`(\d{3})([MP])(\d{3})(?:(\d{3})(\d{3})(G?))?`)
 	// 02A route points: N/S + lat5 + E/W + lon6 + FL(3-4) + temp_sign + temp3 + dir3 + spd3 + optional G
 	rePoint02A = regexp.MustCompile(`([NS])(\d{5})([EW])(\d{6})\s*(\d{3,4})([MP])(\d{3})(\d{3})(\d{3})(G?)`)
 	// 02E route points: Q + N/S + lat5 + E/W + lon6 + ETA4 + FL(3-4) + temp_sign + temp3 + dir3 + spd3 + optional G
 	rePoint02E = regexp.MustCompile(`Q([NS])(\d{5})([EW])(\d{6})\s*(\d{4})\s*(\d{3,4})([MP])(\d{3})(\d{3})(\d{3})(G?)`)
 )
+
+func parseInitialLayers02AD(data string) []InitialWindLayer {
+	prefix := data
+	if idx := rePoint02A.FindStringIndex(data); idx != nil {
+		prefix = data[:idx[0]]
+	}
+
+	var out []InitialWindLayer
+	for _, m := range reInitialLayer02AD.FindAllStringSubmatch(prefix, -1) {
+		altitudeFeet, err := parseInitialAltitudeFeet(m[1])
+		if err != nil {
+			continue
+		}
+
+		layer := InitialWindLayer{
+			AltitudeFeet:   altitudeFeet,
+			AltitudeMetres: feetToMetres(altitudeFeet),
+			TemperatureC:   parseTemp10(m[2], m[3]),
+			Gusting:        m[6] == "G",
+		}
+
+		if m[4] != "" {
+			if dir, err := strconv.Atoi(m[4]); err == nil {
+				layer.WindDirDeg = dir
+			}
+		}
+		if m[5] != "" {
+			if speed, err := strconv.Atoi(m[5]); err == nil {
+				layer.WindSpeedKt = speed
+				layer.WindSpeedKmh = knotsToKmh(speed)
+			}
+		}
+
+		out = append(out, layer)
+	}
+
+	return out
+}
 
 func parseRoutePoints02A(data string) []WindPoint {
 	var out []WindPoint
@@ -345,49 +418,4 @@ func parseRoutePoints02E(data string) []WindPoint {
 		out = append(out, pt)
 	}
 	return out
-}
-
-// parseWindLayers extracts wind layer data from the message body using grok patterns.
-func parseWindLayers(compiler *patterns.Compiler, data string) []WindLayer {
-	var layers []WindLayer
-
-	matches := compiler.FindAllMatches(data, "wind_layer")
-	for _, m := range matches {
-		layer := WindLayer{}
-
-		// Flight level.
-		if fl, err := strconv.Atoi(m["fl"]); err == nil {
-			layer.FlightLevel = fl
-		}
-
-		// Temperature (M = minus, P = plus).
-		if temp, err := strconv.Atoi(m["temp"]); err == nil {
-			if m["temp_sign"] == "M" {
-				layer.Temperature = -temp
-			} else {
-				layer.Temperature = temp
-			}
-		}
-
-		// Optional wind direction.
-		if m["wind_dir"] != "" {
-			if dir, err := strconv.Atoi(m["wind_dir"]); err == nil {
-				layer.WindDir = dir
-			}
-		}
-
-		// Optional wind speed.
-		if m["wind_spd"] != "" {
-			if spd, err := strconv.Atoi(m["wind_spd"]); err == nil {
-				layer.WindSpeed = spd
-			}
-		}
-
-		// Gusting flag.
-		layer.Gusting = m["gust"] == "G"
-
-		layers = append(layers, layer)
-	}
-
-	return layers
 }

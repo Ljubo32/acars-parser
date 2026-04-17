@@ -2,6 +2,7 @@
 package label16
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,9 +23,16 @@ type Result struct {
 	MsgID              int64         `json:"message_id"`
 	Timestamp          string        `json:"timestamp"`
 	Tail               string        `json:"tail,omitempty"`
+	MessageType        string        `json:"message_type,omitempty"`
 	Time               string        `json:"time,omitempty"`
 	Flight             string        `json:"flight,omitempty"`
 	Reference          string        `json:"reference,omitempty"`
+	StartDate          string        `json:"start_date,omitempty"`
+	EndDate            string        `json:"end_date,omitempty"`
+	MessageTime        string        `json:"message_time,omitempty"`
+	Route              string        `json:"route,omitempty"`
+	Origin             string        `json:"origin,omitempty"`
+	Destination        string        `json:"destination,omitempty"`
 	Waypoint           string        `json:"waypoint,omitempty"`
 	CurrentWaypoint    string        `json:"current_waypoint,omitempty"`
 	CurrentWaypointETA string        `json:"current_waypoint_eta,omitempty"`
@@ -33,6 +41,7 @@ type Result struct {
 	Waypoints          []WaypointETA `json:"waypoints,omitempty"`
 	Latitude           float64       `json:"latitude"`
 	Longitude          float64       `json:"longitude"`
+	AltitudeFeet       int           `json:"altitude_feet,omitempty"`
 	FlightLevel        int           `json:"flight_level,omitempty"`
 	GroundSpeed        int           `json:"ground_speed,omitempty"`
 	ETA                string        `json:"eta,omitempty"`
@@ -52,9 +61,11 @@ type Parser struct{}
 
 // Grok compiler singleton.
 var (
-	grokCompiler *patterns.Compiler
-	grokOnce     sync.Once
-	grokErr      error
+	grokCompiler  *patterns.Compiler
+	grokOnce      sync.Once
+	grokErr       error
+	rePOS02Header = regexp.MustCompile(`^POS02\s+([A-Z0-9]{4,7})/(\d{2})(\d{2})(\d{4})([A-Z]{8})$`)
+	rePOS02Coord  = regexp.MustCompile(`^([NS])(\d{5})([EW])(\d{6})$`)
 )
 
 // getCompiler returns the singleton grok compiler.
@@ -81,6 +92,10 @@ func (p *Parser) QuickCheck(text string) bool {
 func (p *Parser) Parse(msg *acars.Message) registry.Result {
 	if msg.Text == "" {
 		return nil
+	}
+
+	if result := parsePOS02(msg); result != nil {
+		return result
 	}
 
 	// Try grok-based parsing.
@@ -163,6 +178,7 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 		}
 
 	case "posa_position":
+		result.MessageType = "pos"
 		result.Reference = match.Captures["reference"]
 		result.Waypoint = result.Reference
 		result.CurrentWaypoint = strings.TrimSpace(match.Captures["current_waypoint"])
@@ -210,6 +226,89 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 	}
 
 	// Validate we got coordinates.
+	if result.Latitude == 0 && result.Longitude == 0 {
+		return nil
+	}
+
+	return result
+}
+
+func parsePOS02(msg *acars.Message) *Result {
+	text := strings.ReplaceAll(msg.Text, "\r", "")
+	lines := strings.Split(text, "\n")
+	if len(lines) < 2 {
+		return nil
+	}
+
+	headerLine := strings.TrimSpace(lines[0])
+	headerMatch := rePOS02Header.FindStringSubmatch(headerLine)
+	if headerMatch == nil {
+		return nil
+	}
+
+	dataLine := ""
+	for _, line := range lines[1:] {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			dataLine = trimmed
+			break
+		}
+	}
+	if dataLine == "" {
+		return nil
+	}
+
+	fields := strings.Split(dataLine, ",")
+	if len(fields) < 5 {
+		return nil
+	}
+
+	coordMatch := rePOS02Coord.FindStringSubmatch(strings.TrimSpace(fields[0]))
+	if coordMatch == nil {
+		return nil
+	}
+
+	altitudeFeet, err := strconv.Atoi(strings.TrimSpace(fields[1]))
+	if err != nil {
+		return nil
+	}
+
+	routeCode := headerMatch[5]
+	origin := routeCode[0:4]
+	destination := routeCode[4:8]
+	result := &Result{
+		MsgID:        int64(msg.ID),
+		Timestamp:    msg.Timestamp,
+		Tail:         msg.Tail,
+		MessageType:  "pos",
+		Flight:       headerMatch[1],
+		Reference:    "POS02",
+		StartDate:    headerMatch[2],
+		EndDate:      headerMatch[3],
+		MessageTime:  formatHHMM(headerMatch[4]),
+		Route:        origin + "-" + destination,
+		Origin:       origin,
+		Destination:  destination,
+		Waypoint:     "POS02",
+		Latitude:     parsePOSADecimalCoord(coordMatch[2], coordMatch[1]),
+		Longitude:    parsePOSADecimalCoord(coordMatch[4], coordMatch[3]),
+		AltitudeFeet: altitudeFeet,
+		FlightLevel:  parseFlightLevelFromFeet(altitudeFeet),
+	}
+
+	if len(fields) > 2 {
+		result.Time = formatETA(strings.TrimSpace(fields[2]))
+	}
+
+	if len(fields) >= 3 {
+		machValue := strings.TrimSpace(fields[len(fields)-3])
+		if mach, err := strconv.ParseFloat(machValue, 64); err == nil {
+			result.Mach = mach
+		}
+
+		result.Temperature = strings.TrimSpace(fields[len(fields)-2])
+	}
+
 	if result.Latitude == 0 && result.Longitude == 0 {
 		return nil
 	}
@@ -284,4 +383,27 @@ func formatETA(value string) string {
 	}
 
 	return value[0:2] + ":" + value[2:4] + ":" + value[4:6]
+}
+
+func formatHHMM(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) != 4 {
+		return value
+	}
+
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return value
+		}
+	}
+
+	return value[0:2] + ":" + value[2:4]
+}
+
+func parseFlightLevelFromFeet(feet int) int {
+	if feet <= 0 {
+		return 0
+	}
+
+	return (feet + 50) / 100
 }

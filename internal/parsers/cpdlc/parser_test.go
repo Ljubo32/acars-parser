@@ -264,6 +264,65 @@ func TestDecodeElementID(t *testing.T) {
 	t.Logf("Decoded element: ID=%d, Label=%s, Text=%s", elem.ID, elem.Label, elem.Text)
 }
 
+func TestParseAAUplinkRouteClearanceSequence(t *testing.T) {
+	parser := &Parser{}
+
+	msg := &acars.Message{
+		ID:        1,
+		Label:     "AA",
+		Text:      "/FIHCAYA.AT1.A6-ECQA0A3A093C4A926641A00180052E3C90213C913B093A0CC9F4EB2E4CEA7220D383D471952374A2D09F4AA208B4EA20971E4A0974E0A0833A220A926641A000207",
+		Timestamp: "2026-04-17T08:58:02Z",
+	}
+
+	result := parser.Parse(msg)
+	if result == nil {
+		t.Fatal("Parse() returned nil")
+	}
+
+	r := result.(*Result)
+	if r.Error != "" {
+		t.Fatalf("Parse() error = %q", r.Error)
+	}
+
+	if len(r.Elements) != 4 {
+		t.Fatalf("Elements count = %d, want 4", len(r.Elements))
+	}
+
+	if r.Header == nil || r.Header.Timestamp == nil || r.Header.Timestamp.String() != "08:58:02" {
+		t.Fatalf("Header timestamp = %#v, want 08:58:02", r.Header)
+	}
+
+	if r.Elements[0].ID != 79 {
+		t.Fatalf("First element ID = %d, want 79", r.Elements[0].ID)
+	}
+	firstData, ok := r.Elements[0].Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("first element data type = %T, want map[string]interface{}", r.Elements[0].Data)
+	}
+	firstPos, ok := firstData["position"].(*Position)
+	if !ok || firstPos == nil || firstPos.Name != "TILAP" {
+		t.Fatalf("unexpected first position: %#v", firstData["position"])
+	}
+	firstRoute, ok := firstData["route_clearance"].(*RouteClearance)
+	if !ok || firstRoute == nil {
+		t.Fatalf("unexpected first route clearance: %#v", firstData["route_clearance"])
+	}
+	if len(firstRoute.RouteInformation) != 1 || firstRoute.RouteInformation[0].Position == nil || firstRoute.RouteInformation[0].Position.Name != "KGI" {
+		t.Fatalf("unexpected first route information: %#v", firstRoute.RouteInformation)
+	}
+	if firstRoute.RouteInfoAdditional != "" {
+		t.Fatalf("unexpected first route info additional: %q", firstRoute.RouteInfoAdditional)
+	}
+	if r.Elements[1].ID != 19 {
+		t.Fatalf("Second element ID = %d, want 19", r.Elements[1].ID)
+	}
+	if r.Elements[2].ID != 118 {
+		t.Fatalf("Third element ID = %d, want 118", r.Elements[2].ID)
+	}
+	if r.Elements[3].ID != 169 {
+		t.Fatalf("Fourth element ID = %d, want 169", r.Elements[3].ID)
+	}
+}
 func TestDecodePositionReportDM48(t *testing.T) {
 	// Raw hex payload (incl. FCS at the end in the ACARS message; our parser trims 2 bytes already).
 	// This is a downlink (label BA) CPDLC dM48 POSITION REPORT and should decode to a populated PositionReport.

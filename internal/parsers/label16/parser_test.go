@@ -192,6 +192,134 @@ func TestParseClassicWaypointPositionStillWorks(t *testing.T) {
 	}
 }
 
+func TestParsePOS02Position(t *testing.T) {
+	tests := []struct {
+		name             string
+		text             string
+		wantFlight       string
+		wantStartDate    string
+		wantEndDate      string
+		wantMessageTime  string
+		wantRoute        string
+		wantOrigin       string
+		wantDestination  string
+		wantLatitude     float64
+		wantLongitude    float64
+		wantAltitudeFeet int
+		wantFlightLevel  int
+		wantTime         string
+		wantMach         float64
+		wantTemperature  string
+	}{
+		{
+			name:             "RXI402 POS02 sample",
+			text:             "POS02    RXI402/04041213EGLLOERK\nN44115E016496,36999,121341,+142,-105,34,499,1630,+11,277,0.849,-57,42.2",
+			wantFlight:       "RXI402",
+			wantStartDate:    "04",
+			wantEndDate:      "04",
+			wantMessageTime:  "12:13",
+			wantRoute:        "EGLL-OERK",
+			wantOrigin:       "EGLL",
+			wantDestination:  "OERK",
+			wantLatitude:     44.115,
+			wantLongitude:    16.496,
+			wantAltitudeFeet: 36999,
+			wantFlightLevel:  370,
+			wantTime:         "12:13:41",
+			wantMach:         0.849,
+			wantTemperature:  "-57",
+		},
+		{
+			name:             "HVN37 POS02 sample",
+			text:             "POS02    HVN37/04050316VVNBEDDF\nN20091E106314,38995,031641,+024,+005,0,468,2244,+53,276,0.843,-54,53.7",
+			wantFlight:       "HVN37",
+			wantStartDate:    "04",
+			wantEndDate:      "05",
+			wantMessageTime:  "03:16",
+			wantRoute:        "VVNB-EDDF",
+			wantOrigin:       "VVNB",
+			wantDestination:  "EDDF",
+			wantLatitude:     20.091,
+			wantLongitude:    106.314,
+			wantAltitudeFeet: 38995,
+			wantFlightLevel:  390,
+			wantTime:         "03:16:41",
+			wantMach:         0.843,
+			wantTemperature:  "-54",
+		},
+	}
+
+	parser := &Parser{}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := &acars.Message{
+				ID:        acars.FlexInt64(103),
+				Timestamp: "2026-03-26T00:00:00Z",
+				Tail:      "TEST03",
+				Label:     "16",
+				Text:      tc.text,
+			}
+
+			parsed := parser.Parse(msg)
+			if parsed == nil {
+				t.Fatal("Parse() returned nil")
+			}
+
+			result, ok := parsed.(*Result)
+			if !ok {
+				t.Fatalf("Parse() returned %T, want *Result", parsed)
+			}
+
+			if result.MessageType != "pos" {
+				t.Errorf("MessageType = %q, want %q", result.MessageType, "pos")
+			}
+			if result.Reference != "POS02" {
+				t.Errorf("Reference = %q, want %q", result.Reference, "POS02")
+			}
+			if result.Waypoint != "POS02" {
+				t.Errorf("Waypoint = %q, want %q", result.Waypoint, "POS02")
+			}
+			if result.Flight != tc.wantFlight {
+				t.Errorf("Flight = %q, want %q", result.Flight, tc.wantFlight)
+			}
+			if result.StartDate != tc.wantStartDate {
+				t.Errorf("StartDate = %q, want %q", result.StartDate, tc.wantStartDate)
+			}
+			if result.EndDate != tc.wantEndDate {
+				t.Errorf("EndDate = %q, want %q", result.EndDate, tc.wantEndDate)
+			}
+			if result.MessageTime != tc.wantMessageTime {
+				t.Errorf("MessageTime = %q, want %q", result.MessageTime, tc.wantMessageTime)
+			}
+			if result.Route != tc.wantRoute {
+				t.Errorf("Route = %q, want %q", result.Route, tc.wantRoute)
+			}
+			if result.Origin != tc.wantOrigin {
+				t.Errorf("Origin = %q, want %q", result.Origin, tc.wantOrigin)
+			}
+			if result.Destination != tc.wantDestination {
+				t.Errorf("Destination = %q, want %q", result.Destination, tc.wantDestination)
+			}
+			assertFloatEqual(t, "latitude", result.Latitude, tc.wantLatitude)
+			assertFloatEqual(t, "longitude", result.Longitude, tc.wantLongitude)
+			if result.AltitudeFeet != tc.wantAltitudeFeet {
+				t.Errorf("AltitudeFeet = %d, want %d", result.AltitudeFeet, tc.wantAltitudeFeet)
+			}
+			if result.FlightLevel != tc.wantFlightLevel {
+				t.Errorf("FlightLevel = %d, want %d", result.FlightLevel, tc.wantFlightLevel)
+			}
+			if result.Time != tc.wantTime {
+				t.Errorf("Time = %q, want %q", result.Time, tc.wantTime)
+			}
+			assertFloatEqual(t, "mach", result.Mach, tc.wantMach)
+			if result.Temperature != tc.wantTemperature {
+				t.Errorf("Temperature = %q, want %q", result.Temperature, tc.wantTemperature)
+			}
+		})
+	}
+}
+
 func assertFloatEqual(t *testing.T, field string, got, want float64) {
 	t.Helper()
 

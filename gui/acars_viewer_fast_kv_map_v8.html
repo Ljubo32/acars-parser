@@ -48,7 +48,7 @@
   .metarow td { padding-top: 0; }
   .routecell-main { white-space: nowrap; }
   .routecell-sub { margin-top: 3px; color: #667085; font-size: 12px; white-space: nowrap; }
-  .routecell-alert { color: #7f1d1d; font-weight: 600; }
+  .routecell-alert { color: #ee3737; font-weight: 600; }
 
   /* Big Leaflet popups: 75% viewport */
     .leaflet-popup.big-popup .leaflet-popup-content-wrapper { width: auto; height: auto; max-width: 75vw; max-height: 75vh; }
@@ -976,7 +976,7 @@ function normalizeInput(parsed){
         type: String(typ || "unknown"),
         lat: lat,
         lon: lon,
-        summary: (buildHFDLSummary(rawObj) || (msg.text || "")).slice(0, 500),
+        summary: buildHFDLSummary(rawObj) || (msg.text || ""),
         raw: rawObj
       };
     });
@@ -1035,7 +1035,7 @@ function normalizeInput(parsed){
       type: String(o.type || o.message_type || ""),
       lat: lat,
       lon: lon,
-      summary: (buildHFDLSummary(o.raw || o) || o.summary || o.text || "").slice(0, 500),
+      summary: buildHFDLSummary(o.raw || o) || o.summary || o.text || "",
       raw: o.raw || o
     };
   });
@@ -2283,6 +2283,73 @@ function buildHFDLPairs(row){
   return pairs;
 }
 
+function extractH2WindContext(value){
+  if (!value || typeof value !== 'object') return null;
+
+  const message = (value.message && typeof value.message === 'object') ? value.message : null;
+  const messageLabel = String(message?.label || value.label || '').trim().toUpperCase();
+  const results = Array.isArray(value.results) ? value.results : [];
+
+  for (const result of results) {
+    if (!result || typeof result !== 'object') continue;
+    const resultType = String(inferResultType(result, messageLabel) || '').trim().toUpperCase();
+    const phase = String(result.phase || '').trim().toUpperCase();
+    if (resultType === 'H2WIND' && (phase === '02A' || phase === '02D')) {
+      return { result, message };
+    }
+  }
+
+  return null;
+}
+
+function formatSignedDecimal(value, fractionDigits){
+  if (!Number.isFinite(value)) return '';
+  const digits = Number.isFinite(fractionDigits) ? fractionDigits : 1;
+  const abs = Math.abs(value).toFixed(digits);
+  if (value > 0) return `+${abs}`;
+  if (value < 0) return `-${abs}`;
+  return Number(0).toFixed(digits);
+}
+
+function buildH2InitialPairs(row){
+  const context = extractH2WindContext(row?.raw || row);
+  if (!context) return [];
+
+  const result = context.result || {};
+  const initialLayers = Array.isArray(result.initial_layers) ? result.initial_layers : [];
+  if (!initialLayers.length) return [];
+
+  const pairs = [];
+  const route = [String(result.origin || '').trim(), String(result.destination || '').trim()].filter(Boolean).join(' -> ');
+  if (route) pairs.push(['Route', route]);
+  pairs.push(['Type', 'H2 start layers']);
+
+  for (const layer of initialLayers){
+    const altitudeFeet = coerceNum(layer?.altitude_feet);
+    const altitudeMetres = coerceNum(layer?.altitude_metres);
+    const temperatureC = coerceNum(layer?.temperature_c);
+    const windDirDeg = coerceNum(layer?.wind_dir_deg);
+    const windSpeedKt = coerceNum(layer?.wind_speed_kt);
+    const windSpeedKmh = coerceNum(layer?.wind_speed_kmh);
+
+    const key = Number.isFinite(altitudeMetres)
+      ? `${Math.round(altitudeMetres)} m`
+      : 'Layer';
+    const valueParts = [];
+    if (Number.isFinite(altitudeFeet)) valueParts.push(`${Math.round(altitudeFeet)} ft`);
+    if (Number.isFinite(temperatureC)) valueParts.push(`${formatSignedDecimal(temperatureC, 1)} C`);
+    if (Number.isFinite(windDirDeg) && Number.isFinite(windSpeedKmh)) {
+      const windText = Number.isFinite(windSpeedKt)
+        ? `${Math.round(windDirDeg)}° / ${Math.round(windSpeedKmh)} km/h (${Math.round(windSpeedKt)} kt)`
+        : `${Math.round(windDirDeg)}° / ${Math.round(windSpeedKmh)} km/h`;
+      valueParts.push(windText);
+    }
+    pairs.push([key, valueParts.join(' • ')]);
+  }
+
+  return pairs;
+}
+
 function buildHFDLSummary(value){
   const context = extractHFDLContext(value);
   if (!context) return '';
@@ -2452,7 +2519,22 @@ function getWaypointMarkerStyle(point, extremes){
   return baseStyle;
 }
 
-function formatWaypointPopupDetails(point, extremeState){
+function flightLevelToMetres(flightLevel){
+  if (!Number.isFinite(flightLevel) || flightLevel <= 0) return null;
+  return Math.round(flightLevel * 30.48);
+}
+
+function formatH2FlightLevelText(flightLevel, isH2){
+  if (!Number.isFinite(flightLevel) || flightLevel <= 0) return '';
+  const flightLevelText = `FL ${Math.round(flightLevel)}`;
+  if (!isH2) return flightLevelText;
+  const altitudeMetres = flightLevelToMetres(flightLevel);
+  return Number.isFinite(altitudeMetres)
+    ? `${flightLevelText} • ${altitudeMetres} m`
+    : flightLevelText;
+}
+
+function formatWaypointPopupDetails(point, extremeState, row){
   const pointName = String(point?.name || point?.waypoint || point?.position_name || '').trim();
   const segment = String(point?.segment || '').trim();
   const flightLevel = coerceNum(point?.flight_level ?? point?.flightLevel ?? point?.FL ?? point?.fl);
@@ -2461,6 +2543,7 @@ function formatWaypointPopupDetails(point, extremeState){
   const temperature = coerceNum(point?.temperature ?? point?.temp);
   const windSpeedKmh = Number.isFinite(windSpeed) ? windSpeed * 1.852 : null;
   const layers = Array.isArray(point?.layers) ? [...point.layers] : [];
+  const isH2 = String(row?.label || '').trim().toUpperCase() === 'H2';
 
   let segmentText = '';
   if (segment === 'route_wind') segmentText = 'PWI route wind';
@@ -2495,14 +2578,16 @@ function formatWaypointPopupDetails(point, extremeState){
         valueParts.push(`${Math.round(layerTemperature)} C`);
       }
       const layerKey = Number.isFinite(layerFlightLevel) && layerFlightLevel > 0
-        ? `FL ${Math.round(layerFlightLevel)}`
+        ? formatH2FlightLevelText(layerFlightLevel, isH2)
         : 'Layer';
       if (valueParts.length) {
         pairs.push([layerKey, valueParts.join(' • ')]);
       }
     }
   } else {
-    if (Number.isFinite(flightLevel) && flightLevel > 0) pairs.push(['Flight level', `FL ${Math.round(flightLevel)}`]);
+    if (Number.isFinite(flightLevel) && flightLevel > 0) {
+      pairs.push(['Flight level', formatH2FlightLevelText(flightLevel, isH2)]);
+    }
     if (Number.isFinite(windDir) && Number.isFinite(windSpeedKmh)) pairs.push(['Wind', `${Math.round(windDir)}° / ${Math.round(windSpeedKmh)} km/h`]);
     if (Number.isFinite(temperature)) pairs.push(['Temperature', `${Math.round(temperature)} C`]);
   }
@@ -2713,6 +2798,7 @@ function openMapRows(pts, titleText, openFirstPopup){
       allLatLngs.push(latlng);
       const cm = L.circleMarker(latlng, getDirectMarkerStyle(r));
       const hfdlPairs = buildHFDLPairs(r);
+      const h2Pairs = buildH2InitialPairs(r);
       const hfdlContext = extractHFDLContext(r);
       const popupTitle = hfdlPairs.length
         ? `${String(extractFlightDisplay(r.raw || r) || r.tail || '').trim() || 'HFDL'} • ${String(hfdlContext?.result?.hfnpdu_type || r.type || '').trim() || 'data'} • ${String(r.label || 'HFDL').trim() || 'HFDL'}`
@@ -2721,7 +2807,7 @@ function openMapRows(pts, titleText, openFirstPopup){
         `<div style="max-width:560px">
           <div class="nowrap"><b>${escapeHtml(popupTitle)}</b></div>
           <div class="kvmini" style="margin:4px 0 8px 0">${escapeHtml(formatTimestamp(r.timestamp))} • ${escapeHtml(coordStr(r.lat, r.lon))}</div>
-          ${hfdlPairs.length ? renderKeyValuePairs(hfdlPairs) : renderDetailsObject(r.raw)}
+          ${hfdlPairs.length ? renderKeyValuePairs(hfdlPairs) : h2Pairs.length ? renderKeyValuePairs(h2Pairs) : renderDetailsObject(r.raw)}
          </div>`;
       cm.bindPopup(popupHtml, {maxWidth: 9999, maxHeight: 9999, className: 'big-popup'});
       cm.addTo(allLayer);
@@ -2751,7 +2837,7 @@ function openMapRows(pts, titleText, openFirstPopup){
         `<div style="max-width:560px">
           <div class="nowrap"><b>${escapeHtml(r.tail || '')}</b> • ${escapeHtml(pointName)} • ${escapeHtml(r.label || '')}</div>
           <div class="kvmini" style="margin:4px 0 8px 0">${escapeHtml(formatTimestamp(r.timestamp))} • ${escapeHtml(coordStr(lat, lon))}</div>
-          ${formatWaypointPopupDetails(p, waypointExtremeState)}
+          ${formatWaypointPopupDetails(p, waypointExtremeState, r)}
          </div>`;
       cm.bindPopup(popupHtml, {maxWidth: 9999, maxHeight: 9999, className: 'big-popup'});
       cm.addTo(allLayer);
