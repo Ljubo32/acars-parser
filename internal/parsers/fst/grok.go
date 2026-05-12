@@ -12,7 +12,7 @@ var Formats = []patterns.Format{
 		Pattern: `FST(?P<seq>01)(?P<origin>{ICAO})(?P<dest>{ICAO})` +
 			`(?P<lat_dir>[NS])(?P<lat>\d{5,7})` +
 			`(?P<lon_dir>[EW])(?P<lon>\d{5,7})` +
-			`(?P<rest>\d{3}\s+\d{1,3}\s+\d{1,3}\s+(?:M?\d{1,2}C\s+\d{27,28}|M?\d{1,2}C\d{14,15}\s+\d{8}))$`,
+			`(?P<rest>\d{3}\s+\d{1,3}\s+\d{1,3}[MK]?\s+(?:M?\d{1,2}C\s+\d{27,28}|M?\d{1,2}C\d{14,15}\s+\d{8}))$`,
 		Fields: []string{"seq", "origin", "dest", "lat_dir", "lat", "lon_dir", "lon", "rest"},
 	},
 	// FST format with 5-digit longitude (more common for European coordinates).

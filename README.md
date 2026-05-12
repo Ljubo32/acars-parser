@@ -22,8 +22,11 @@ acars_parser/
 │   ├── patterns/           # Shared regex patterns and extractors
 │   └── parsers/            # Individual parser implementations
 │       ├── adsc/           # ADS-C (B6)
+  │       ├── abs/            # ABS0 route hints from H1
 │       ├── agfsr/          # AGFSR flight status (4T)
+│       ├── atncm/          # ATN CM logon route hints from VDL2
 │       ├── cpdlc/          # CPDLC FANS-1/A (AA)
+  │       ├── dis/            # RA DIS OFP info
 │       ├── eta/            # ETA/timing (5Z)
 │       ├── fst/            # FST reports (15)
 │       ├── h1/             # H1 FPN/POS/PWI
@@ -55,11 +58,27 @@ When `Waypoints.txt` contains multiple fixes with the same name in different reg
 
 When the viewer is served over HTTP from the `gui/` directory, it will try to load `Waypoints.txt` automatically. When the HTML file is opened directly from disk and the browser blocks sibling-file fetches, use the `Load Waypoints` picker in the viewer to load the same file manually.
 
+The viewer can also load airport names from [internal/airports/airports.json](internal/airports/airports.json). When that lookup is available, the Flight column shows one airport-name line for each ICAO code in the saved route between the route string and the saved-route date. For example, a saved route such as `GUCY-GOBD-OMDB` renders `Conakry`, `Blaise Diagne International`, and `Dubai International` on separate lines underneath the route. Those display labels omit `Od:` and `Do:` prefixes, and they also strip a trailing `Airport` suffix to keep the table narrower. Parsed-only rows do not show airport names until the route has been saved, which keeps unsaved rows visually simpler. When the viewer is served over HTTP, it tries to auto-load that airport file; when the HTML file is opened directly from disk, use the `Load Airports` picker if the browser blocks auto-load in file mode.
+
 When JSON output is produced through [gui/acars_parser_gui_dnd_fix2.py](gui/acars_parser_gui_dnd_fix2.py), the GUI can also enrich each JSON row with route lookup data from [gui/flightroute.sqb](gui/flightroute.sqb) when that database is present. The `Route lookup from flightroute.sqb` checkbox controls that behaviour, so route enrichment can be turned off when faster JSON generation is preferred. When enabled, the lookup uses the already normalised ICAO-style flight value, queries the `FlightRoute` table by the `flight` column, and stores the matched `route` plus the latest `updatetime` on the JSON row. In the HTML viewer, those fields are now rendered directly underneath the Flight value instead of using a separate Route column. If no lookup row is found, or the database is unavailable, extraction continues and only the Flight value is shown.
+
+When that GUI runs in merge mode with JSON output enabled, it now reuses the same merged output filename instead of creating incremented names such as `_1`. This matches the single-file extraction path and allows the existing merged JSON to be overwritten directly.
+
+The standalone HTML viewer can now also write to that same `FlightRoute` table through the local Go `routeapi` bridge. Run `acars_parser routeapi -db gui/flightroute.sqb -port 8765`, then the viewer shows two small buttons underneath each row's `Prikaži na mapi` action when the row has a usable flight key: `Upiši` writes the parsed ICAO route in `XXXX-XXXX` format with the row's log date as `updatetime` in `YYYY-MM-DD`, and `Reload` refreshes the saved route for that flight from the database. That refresh is applied to all currently loaded rows with the same flight key so manually synced routes do not keep showing as mismatches in other message types for the same flight.
+
+In that same Flight column, the viewer now labels route lines with `parsed` or `saved` badges so it is obvious whether the displayed route comes from the current parsed row or from the `FlightRoute` lookup database. When a row has only a parsed route candidate and nothing saved yet, the viewer shows that parsed ICAO route directly instead of leaving the route area blank.
+
+The viewer now also ignores numeric-only values when selecting a Flight display value or a route-save flight key. That prevents unrelated payload numbers from being shown in the Flight column or from being used as a lookup key.
+
+That route-write path now also accepts the Unix-seconds timestamps emitted by `acarsdec`, so ACARS JSON rows with values such as `1777761826.271997` can be written to `flightroute.sqb` the same way as ISO-timestamped VDL2 rows.
+
+To make route troubleshooting less ambiguous when more than one `flightroute.sqb` exists, the `routeapi` bridge now resolves the database path to an absolute path and exposes it through `/api/flightroute/config`. The HTML viewer shows that exact database path in the `Route API` status line, so it is immediately obvious which SQLite file the `Upiši` and `Reload` buttons are using.
 
 When that rendered `route` value is in the ICAO `XXXX-XXXX` format and it does not match the best parsed origin/destination pair already present in the JSON, the viewer now highlights that route line in dark red under the Flight value. The viewer also highlights the `updatetime` line in dark red when it begins with `1`, which helps suspicious Unix-style timestamps stand out during review.
 
 The viewer now always shows a `raw text` details block for non-empty ACARS payload text, including single-line messages. That block no longer relies on any symbol-limit style truncation in the details panel; instead it wraps long lines to the available panel width.
+
+The main search box in the HTML viewer now also has a `srch txt` checkbox. When it is ticked, the search is limited to the JSON `text` or `message.text` payload fields instead of the broader combined row summary. When it is unticked, search behaves as before and scans the wider rendered row content.
 
 The main `Summary / Details` column in the HTML viewer also no longer truncates the summary text to a fixed 500-character limit for normal row rendering paths. Long summaries now rely on the existing word wrap in that column instead of being cut off.
 
@@ -78,6 +97,12 @@ For AFN payloads that contain segments such as `/FMH<flight>` and `/FAK0,<destin
 For RA payloads carrying `INI01` initialisation messages such as `QUDXBEGEK~1INI01091501 UAE810 /09/OEMA/OMDB/...`, the extractor now infers `message.flight`, `message.departing_airport`, and `message.destination_airport` from the raw message text. The parsed result for those rows now also exposes `msg_type: "INI"`.
 
 For RA acknowledgement and failure payloads that include literals such as `FLIGHT NUMBER: EK0806/UAE806 SECTOR: OEJN-OMDB` or `FLIGHT NUMBER: UAE394 SECTOR: OMDB-VVNB`, the extractor now also infers `message.flight`, `message.departing_airport`, and `message.destination_airport` directly from the raw message text. When the `FLIGHT NUMBER:` field carries both an IATA-style and ICAO-style identifier separated by `/`, the extractor prefers the ICAO-style flight value after the slash.
+
+For RA `DIS` payloads that contain an `OFP INFO` block such as `EK512 DXB-DEL A6ENM: CURRENT OFP NUMBER 15/0/0`, the extractor now also infers `message.flight`, `message.departing_airport`, and `message.destination_airport` from that operational flight-plan summary. The dedicated `dis` parser preserves the displayed flight and route from the message body, while the message-level airport fields are normalised to ICAO codes for downstream route handling.
+
+The same `dis` parser now also returns a dedicated parsed result for `LDSHT ACCEPT ACK` messages such as `FLIGHT NUMBER: EK0615/UAE6W` with `SECTOR: OPIS-OMDB`. Those rows are now grouped under the `DIS` type in the viewer filter instead of staying untyped.
+
+It also returns a dedicated parsed result for `FLT SUMM ACK` / `FLIGHT SUMMARY ACK` messages that carry `FLIGHT NUMBER:` and `SECTOR:` lines. Those acknowledgement rows are also grouped under the same `DIS` viewer type. For rows where the flight field contains both variants separated by `/`, such as `EK0651/UAE7P`, the parsed `flight` value prefers the trailing token, which matches the existing RA metadata extraction behaviour.
 
 For PDC-style clearances, including label `A3` payloads such as `/...DC1/CLD ... ZSSS PDC ... CES239 CLRD TO VMMC ...`, the extractor also populates `message.flight`, `message.departing_airport`, and `message.destination_airport` from the raw clearance text.
 
@@ -99,7 +124,39 @@ The HTML viewer also gives `hfdl_data` rows a dedicated summary, parsed-details 
 
 For H2 wind messages that begin with `02A` or `02D`, the backend now parses the short start-position wind blocks before the coordinate-bearing points as structured `initial_layers` instead of misreading them as flight levels. Each layer preserves the altitude in feet, a converted altitude in metres, signed temperature in Celsius with one decimal place, and wind direction and speed with a derived km/h value. In the HTML viewer map popup, those `initial_layers` are shown only on the direct start-position marker for the H2 row, while the later coordinate-bearing route points keep their own shorter per-point wind displays. Route-point popups in the HTML viewer now also display altitude in metres alongside flight levels for H2 wind messages.
 
+For FST01 fixed-layout flight status reports, the backend now also accepts the observed variant where the third field before the temperature carries a suffix such as `145M`. Those rows continue through the compact decoder, which preserves separate `track` and `heading` values in the observed field order instead of falling back to the older heuristic path that could conflate them. For the combined-temperature A350-style compact variant, the backend also now decodes the reported wind direction using the same `track`/`heading` disambiguation rule used in the viewer script, so samples such as `M51C045098113111537` no longer expose the raw encoded bearing as the final wind direction.
+
+FST coordinate decoding now also respects the actual coordinate field width instead of always assuming four decimal places. This fixes five-digit latitude samples such as `N46976`, which should decode to `46.976` rather than `4.6976`.
+
+H1 messages that carry `ABS0` blocks now also have a dedicated `abs` parser. It extracts `origin`, `destination`, `route`, and an optional three-digit `level` from the ABS0 line or the following line, which lets the state tracker learn route hints from messages such as `ABS001DA_T       EBBRLTFJ537`. It also decodes ABS0 position rows where the second line starts with compact `lat lon` values such as `44391  19636`, exposing `latitude: 44.391`, `longitude: 19.636`, the five-digit `altitude_ft` immediately before the first signed temperature token, that `temperature_c` value, and a `positions` array when the block carries multiple position rows.
+
+VDL2 logs that carry a nested ATN CM logon request now also emit a synthetic `ATNCM` message when the nested context-management block contains a `departure_airport` and `destination_airport`. The dedicated `atncm` parser exposes `flight_id`, `origin`, `destination`, and `route`, so route learning can use ATN CM logon data even when there is no useful ACARS free text to parse.
+
 When the input contains `message.flight` with a leading two-character IATA airline designator from the embedded mapping followed by digits, the emitted JSON normalises that value to the matching three-letter ICAO airline code. This includes alphanumeric designators such as `2C -> CMA` and `2G -> HUA`. The backend also strips leading zeros from the numeric part of `flight` values, so `AEE01BS` becomes `AEE1BS`. The `flight_id` field is preserved as received.
+
+The loadsheet parser now applies the same backend normalisation to the route tuple it extracts from IATA-formatted loadsheet text. Inputs such as `U21234/... LTN DUB` now emit `flight: "EZY1234"`, `origin: "EGGW"`, and `destination: "EIDW"`, which lets the parsed result compare directly against ICAO-style route rows in `flightroute.sqb`.
+
+The loadsheet parser also now recognises the multiline header variant where the flight and date are on one line and the IATA route is on the next line, for example `WFL2093/26  26APR26` followed by `MAD CLO ...`. In that case the parser emits `flight: "WFL2093"`, `origin: "LEMD"`, and `destination: "SKCL"`, and it prefers the explicit `PAX` line over earlier generic `TTL` totals such as `TTL 24217`.
+
+The loadsheet parser now also accepts two additional header variants that occur in airline-specific formats: a slash-separated route line such as `AMS/MCT A4OSH CREW 2/8` after a flight header like `WY172/26 26APR26 2044`, and a multiline header where the flight line carries an extra aircraft token such as `EY844/26 26APR26 B789` before the next line starts with `SVO AUH ...`. For passenger totals, explicit forms such as `PAX TTL 187`, `PAX/24/253 TTL 281`, and `PAX 277 PLUS 4` now take precedence over earlier generic `TTL` cargo or payload totals.
+
+For multiline Etihad-style headers such as `EY031/19 20MAR26 B789` followed by `AUH CDG ...`, the parser now keeps that explicit header flight and route even when later cargo or service rows contain airport-like triplets such as `CDG FRE 15852`. That prevents payload counts from overwriting the true flight and route.
+
+The loadsheet parser also accepts compact headers where the flight, date, and IATA route are concatenated on one line, such as `AF0274/26/26APR26CDGHNDF-GSQK4/13`. In that case it extracts `flight: "AFR274"`, `origin: "LFPG"`, and `destination: "RJTT"`, and it honours explicit four-segment passenger totals such as `PAX/4/60/33/200 TTL 300.`.
+
+The parser also accepts `FINAL01`-style loadsheet headers where the flight and compact six-letter IATA route share the same line, such as `FINAL01 EK784/26    LOSDXB A6ENN 26APR26`. In that case it extracts `flight: "UAE784"`, `origin: "DNMM"`, and `destination: "OMDB"`, and it prefers the explicit total in lines such as `PAX  7/26/238       TTL 273` over the partial category sum.
+
+The loadsheet parser also accepts airline headers where the `FLIGHT:` field carries the flight and date together, followed by a compact six-letter IATA route, such as `FLIGHT:MU2076/04APR26   SVOPKX B6083`. In that case it extracts `flight: "CES2076"`, `origin: "UUEE"`, and `destination: "ZBAD"` while keeping the usual airline and airport normalisation.
+
+The loadsheet parser also accepts compact inline headers where the flight and a six-letter IATA route share the same line without an explicit date token after the slash count, such as `UU969/04 RUNCDG F-OLRD 3/12`. In that case it extracts `flight: "REU969"`, `origin: "FMEE"`, and `destination: "LFPG"` from the same header line.
+
+The loadsheet parser also accepts multiline headers where the flight line carries a slash-date plus a repeated date token before the route appears on the next line, such as `ET863/01APR26 01APR26 EDNO-2` followed by `ADD LUN ...`. In that case it extracts `flight: "ETH863"`, `origin: "HAAB"`, and `destination: "FLLS"`, and it also tolerates edition markers such as `EDNO-2`.
+
+The loadsheet parser also accepts slash-delimited operational summaries where the flight reference appears at the end of the first line and the sector is carried in a dedicated `SEC/` field, such as `/BA0085` with `SEC/LHR-YVR`. In that case it extracts `flight: "BAW85"`, `origin: "EGLL"`, and `destination: "CYVR"`, and it also reads slash-delimited values such as `ZFW/181123`, `TOW/248325`, `FWT/068024`, and `CRW/03/10`.
+
+The parser also accepts tabular loadsheet formats where the route and flight appear in a `FROM/TO FLIGHT` row such as `BCN SCL LL 2605 ...`, and where passenger totals are carried on a `PASSENGER/CABIN BAG ... TTL 236` line rather than a plain `PAX TTL` line. In that case it extracts `flight: "LVL2605"`, `origin: "LEBL"`, `destination: "SCEL"`, and it also reads verbose weight labels such as `ZERO FUEL WEIGHT ACTUAL`, `TAKE OFF FUEL`, and `TAKE OFF WEIGHT ACTUAL`.
+
+The same tabular logic also accepts rows where the flight token is already combined, such as `MAD CLO WFL2093 ...`, instead of being split as an airline code plus a separate flight number. In that case it extracts `flight: "WFL2093"`, `origin: "LEMD"`, and `destination: "SKCL"` from the table row.
 
 **Options:**
 - `-input FILE` - Input JSONL file (default: stdin)
@@ -375,7 +432,7 @@ Parses flight status reports with route, position, temperature, and FST01 fixed-
 FST01EGLCEIDWN51420W00049317803270072M020C014331258256370
 ```
 
-For the space-delimited FST01 layout, the parser extracts the route, coordinates, flight level, temperature, wind direction, heading, track, and ground speed. Wind speed and ground speed are exposed via `wind_speed_kts` / `wind_speed_kmh` and `ground_speed_kts` / `ground_speed_kmh`, while the JSON output keeps the route as a single field instead of repeating separate origin and destination keys. The parsed JSON result also emits `msg_type: "FST"`.
+For the space-delimited FST01 layout, the parser extracts the route, coordinates, flight level, temperature, wind direction, track, heading, and ground speed. Wind speed and ground speed are exposed via `wind_speed_kts` / `wind_speed_kmh` and `ground_speed_kts` / `ground_speed_kmh`, while the JSON output keeps the route as a single field instead of repeating separate origin and destination keys. The parsed JSON result also emits `msg_type: "FST"`.
 
 ### Label 83 - Position Reports (3.6k messages)
 Parses PR and ZSPD position report formats.

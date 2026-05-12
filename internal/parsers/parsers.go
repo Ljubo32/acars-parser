@@ -4,10 +4,13 @@ package parsers
 
 import (
 	// Import all parser packages to register them with the registry.
+	_ "acars_parser/internal/parsers/abs"
 	_ "acars_parser/internal/parsers/adsc"
 	_ "acars_parser/internal/parsers/agfsr"
 	_ "acars_parser/internal/parsers/atis"
+	_ "acars_parser/internal/parsers/atncm"
 	_ "acars_parser/internal/parsers/cpdlc"
+	_ "acars_parser/internal/parsers/dis"
 	_ "acars_parser/internal/parsers/eb00"
 	_ "acars_parser/internal/parsers/envelope"
 	_ "acars_parser/internal/parsers/eta"

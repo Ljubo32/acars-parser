@@ -47,8 +47,34 @@
   }
   .metarow td { padding-top: 0; }
   .routecell-main { white-space: nowrap; }
+  .routecell-mainline { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
   .routecell-sub { margin-top: 3px; color: #667085; font-size: 12px; white-space: nowrap; }
+  .routecell-airport {
+    margin-top: 2px;
+    color: #344054;
+    font-size: 12px;
+    line-height: 1.35;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+  }
   .routecell-alert { color: #ee3737; font-weight: 600; }
+  .route-source-badge {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 999px;
+    border: 1px solid #d0d5dd;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    background: #fff;
+    color: #475467;
+  }
+  .route-source-badge-parsed { border-color: #f3b5b5; background: #fde8e8; color: #b42318; }
+  .route-source-badge-saved { border-color: #c8d6f9; background: #eef4ff; color: #20407a; }
+  .routecell-candidate { color: #475467; }
 
   /* Big Leaflet popups: 75% viewport */
     .leaflet-popup.big-popup .leaflet-popup-content-wrapper { width: auto; height: auto; max-width: 75vw; max-height: 75vh; }
@@ -66,6 +92,10 @@
   .pager button { padding: 6px 10px; }
   .small { font-size: 12px; }
   .btn-mini { padding: 4px 8px; border-radius: 10px; }
+  .btn-mini:disabled { opacity: 0.55; cursor: not-allowed; }
+  .btn-mini-secondary { padding: 3px 7px; font-size: 11px; border-radius: 8px; }
+  .map-action-stack { display:flex; flex-direction:column; gap:6px; align-items:flex-start; }
+  .map-action-row { display:flex; gap:6px; align-items:center; }
   .nowrap { white-space: nowrap; }
 
   /* Map modal */
@@ -122,6 +152,40 @@
     white-space: pre-wrap;
     word-break: break-word;
     overflow-wrap: anywhere;
+    line-height: 1.35;
+  }
+
+  .th-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .th-title {
+    display: inline-flex;
+    align-items: center;
+    min-width: 0;
+  }
+
+  .message-summary-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+  }
+
+  .message-expand-toggle {
+    padding: 2px 6px;
+    min-width: 28px;
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1;
+  }
+
+  .message-summary-code.is-collapsed {
+    max-height: calc(1.35em * 18);
+    overflow: hidden;
   }
 
   /* Raw message text block (keeps newlines) */
@@ -154,13 +218,18 @@
     <input id="file" type="file" accept=".json,application/json">
     <span class="pill">Load Waypoints:</span>
     <input id="waypointsFile" type="file" accept=".txt,text/plain">
+    <span class="pill">Load Airports:</span>
+    <input id="airportsFile" type="file" accept=".json,application/json">
     <span class="small muted" id="waypointStatus">Waypoint lookup: not loaded</span>
+    <span class="small muted" id="airportStatus">Airport lookup: not loaded</span>
+    <span class="small muted" id="routeApiStatus">Route API: idle</span>
     <button id="showAllMap">Prikaži sve na mapi</button>
     <label class="cb small"><input id="lazyDetails" type="checkbox" checked> lazy details (recommended)</label>
   </div>
 
   <div class="bar">
     <input id="q" type="search" placeholder="Search (tail / label / type / text)..." autocomplete="off">
+    <label class="cb"><input id="searchTextOnly" type="checkbox" checked> srch txt</label>
     <select id="label"></select>
     <select id="type"></select>
     <label class="cb"><input id="onlyCoords" type="checkbox"> only with coords</label>
@@ -192,7 +261,7 @@
         <th style="width:130px">Type</th>
         <th style="width:110px">Coords</th>
         <th style="width:120px">Map</th>
-        <th id="thDetails" class="sortable">Summary / Details<span class="sort-indicator"></span></th>
+        <th id="thDetails" class="sortable"><div class="th-controls"><span class="th-title">Summary / Details<span class="sort-indicator"></span></span><button id="toggleAllMessages" class="btn-mini btn-mini-secondary" type="button" title="Raširi ili skupi sve vidljive poruke">Raširi sve</button></div></th>
       </tr>
     </thead>
     <tbody id="tbody"></tbody>
@@ -219,7 +288,13 @@ let page = 0;
 let sortState = { key: '', dir: 'asc' };
 let waypointLookup = new Map();
 let waypointLookupSource = '';
+let airportLookup = new Map();
+let airportLookupSource = '';
 let waypointRowCache = new WeakMap();
+const MESSAGE_PREVIEW_LINES = 18;
+const expandedMessageRows = new Set();
+const DEFAULT_ROUTE_API_BASE = 'http://127.0.0.1:8765';
+let routeAPIConfig = null;
 
 // Map globals
 let map = null;
@@ -247,6 +322,11 @@ function normaliseWaypointName(value){
   return String(value || '').trim().toUpperCase();
 }
 
+function normaliseAirportCodeKey(value){
+  const code = String(value || '').trim().toUpperCase();
+  return /^[A-Z]{4}$/.test(code) ? code : '';
+}
+
 function updateWaypointStatus(){
   const el = document.getElementById('waypointStatus');
   if (!el) return;
@@ -262,6 +342,23 @@ function setWaypointStatus(text){
   const el = document.getElementById('waypointStatus');
   if (!el) return;
   el.textContent = String(text || '').trim() || 'Waypoint lookup: not loaded';
+}
+
+function updateAirportStatus(){
+  const el = document.getElementById('airportStatus');
+  if (!el) return;
+  if (!airportLookup.size){
+    el.textContent = 'Airport lookup: not loaded';
+    return;
+  }
+  const sourceText = airportLookupSource ? ` (${airportLookupSource})` : '';
+  el.textContent = `Airport lookup: ${airportLookup.size} loaded${sourceText}`;
+}
+
+function setAirportStatus(text){
+  const el = document.getElementById('airportStatus');
+  if (!el) return;
+  el.textContent = String(text || '').trim() || 'Airport lookup: not loaded';
 }
 
 function parseWaypointLookupText(text){
@@ -308,6 +405,43 @@ function getWaypointCandidatesByName(name){
   return key ? (waypointLookup.get(key) || []) : [];
 }
 
+function parseAirportLookupJSON(text){
+  const parsed = JSON.parse(String(text || '[]'));
+  if (!Array.isArray(parsed)) return new Map();
+
+  const lookup = new Map();
+  for (const entry of parsed){
+    if (!entry || typeof entry !== 'object') continue;
+
+    const code = normaliseAirportCodeKey(entry.icao);
+    const name = typeof entry.airport === 'string' ? entry.airport.trim() : '';
+    if (!code || !name || lookup.has(code)) continue;
+    lookup.set(code, name);
+  }
+
+  return lookup;
+}
+
+function installAirportLookup(lookup, sourceLabel){
+  airportLookup = lookup instanceof Map ? lookup : new Map();
+  airportLookupSource = String(sourceLabel || '').trim();
+  updateAirportStatus();
+  if (rows.length){
+    recomputeFilterAndRender();
+  }
+}
+
+function getAirportNameByCode(code){
+  const key = normaliseAirportCodeKey(code);
+  return key ? String(airportLookup.get(key) || '').trim() : '';
+}
+
+function sanitiseAirportDisplayName(name){
+  const trimmed = String(name || '').trim();
+  if (!trimmed) return '';
+  return trimmed.replace(/\s+Airport\s*$/i, '').trim();
+}
+
 async function tryLoadDefaultWaypointLookup(){
   const candidates = [];
   try {
@@ -338,6 +472,78 @@ async function tryLoadDefaultWaypointLookup(){
   }
 
   updateWaypointStatus();
+}
+
+async function tryLoadDefaultAirportLookup(){
+  const candidates = [];
+  try {
+    candidates.push(new URL('../internal/airports/airports.json', window.location.href).href);
+  } catch (err) {
+    // Ignore malformed base URL edge cases.
+  }
+  candidates.push('../internal/airports/airports.json', './airports.json', 'airports.json');
+
+  for (const candidate of [...new Set(candidates)]){
+    try {
+      const response = await fetch(candidate);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const text = await response.text();
+      const lookup = parseAirportLookupJSON(text);
+      if (lookup.size){
+        installAirportLookup(lookup, 'airports.json');
+        return;
+      }
+    } catch (err) {
+      // Try the next candidate URL.
+    }
+  }
+
+  if (window.location.protocol === 'file:'){
+    setAirportStatus('Airport lookup: browser blocks auto-load in file mode; use Load Airports or open via localhost');
+    return;
+  }
+
+  updateAirportStatus();
+}
+
+function trimTrailingSlashes(value){
+  return String(value || '').replace(/\/+$/, '');
+}
+
+function getRouteAPIBase(){
+  try {
+    const params = new URLSearchParams(window.location.search || '');
+    const fromQuery = trimTrailingSlashes(params.get('routeApiBase') || params.get('route_api_base') || '');
+    if (fromQuery) return fromQuery;
+  } catch (err) {
+    // Ignore invalid query-string edge cases.
+  }
+  return DEFAULT_ROUTE_API_BASE;
+}
+
+function setRouteAPIStatus(message, isError){
+  const el = document.getElementById('routeApiStatus');
+  if (!el) return;
+  el.textContent = message;
+  el.style.color = isError ? '#b42318' : '#667085';
+}
+
+function getRouteAPIStatusLabel(){
+  const dbPath = String(routeAPIConfig?.db_path || '').trim();
+  if (!dbPath) return `Route API: ${getRouteAPIBase()}`;
+  return `Route API: ${getRouteAPIBase()} -> ${dbPath}`;
+}
+
+async function refreshRouteAPIConfig(){
+  try {
+    const response = await fetch(`${getRouteAPIBase()}/api/flightroute/config`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    routeAPIConfig = await response.json();
+    setRouteAPIStatus(getRouteAPIStatusLabel(), false);
+  } catch (err) {
+    routeAPIConfig = null;
+    setRouteAPIStatus(`Route API: ${getRouteAPIBase()} (config unavailable)`, true);
+  }
 }
 
 
@@ -458,13 +664,32 @@ function extractFlightDisplay(obj){
 
   const formatPair = (flight, flightId) => {
     const parts = [];
-    if (typeof flight === 'string' && flight.trim()) parts.push(normaliseFlightCode(flight));
-    if (typeof flightId === 'string' && flightId.trim()) parts.push(normaliseFlightCode(flightId));
+    if (typeof flight === 'string' && flight.trim()) {
+      const normalisedFlight = normaliseFlightCode(flight);
+      if (isLikelyFlightCode(normalisedFlight)) parts.push(normalisedFlight);
+    }
+    if (typeof flightId === 'string' && flightId.trim()) {
+      const normalisedFlightID = normaliseFlightCode(flightId);
+      if (isLikelyFlightCode(normalisedFlightID)) parts.push(normalisedFlightID);
+    }
     return parts.join(' / ');
+  };
+
+  const pickFromResults = (results) => {
+    if (!Array.isArray(results)) return '';
+    for (const result of results){
+      if (!result || typeof result !== 'object') continue;
+      const display = formatPair(result.flight, result.flight_id ?? result.flightId ?? result.adsc_flight_id);
+      if (display) return display;
+    }
+    return '';
   };
 
   const direct = formatPair(obj.flight, obj.flight_id ?? obj.flightId ?? obj.adsc_flight_id);
   if (direct) return direct;
+
+  const fromResults = pickFromResults(obj.results);
+  if (fromResults) return fromResults;
 
   const msg = obj.message;
   if (msg && typeof msg === 'object'){
@@ -477,7 +702,11 @@ function extractFlightDisplay(obj){
 
 function getFlightDisplayForRow(row){
   if (!row || typeof row !== 'object') return '';
-  return extractFlightDisplay(row.raw || row) || row.flight || '';
+  const extracted = extractFlightDisplay(row.raw || row);
+  if (extracted) return extracted;
+
+  const direct = normaliseFlightCode(String(row.flight || '').trim());
+  return isLikelyFlightCode(direct) ? direct : '';
 }
 
 function normaliseFlightCode(value){
@@ -492,6 +721,52 @@ function normaliseFlightCode(value){
   const digits = String(parseInt(match[2], 10));
   const suffix = (match[3] || "").toUpperCase();
   return prefix + digits + suffix;
+}
+
+function isLikelyFlightCode(value){
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim().toUpperCase();
+  if (!trimmed) return false;
+  if (!/^[A-Z0-9-]+$/.test(trimmed)) return false;
+  return /[A-Z]/.test(trimmed) && /\d/.test(trimmed);
+}
+
+function extractFlightLookupKey(obj){
+  if (!obj || typeof obj !== 'object') return '';
+
+  const candidates = [
+    obj.flight,
+    obj.flight_id,
+    obj.flightId,
+    obj.adsc_flight_id,
+  ];
+
+  const message = obj.message;
+  if (message && typeof message === 'object'){
+    candidates.push(message.flight, message.flight_id, message.flightId, message.adsc_flight_id);
+  }
+
+  const results = Array.isArray(obj.results) ? obj.results : [];
+  for (const result of results){
+    if (!result || typeof result !== 'object') continue;
+    candidates.push(result.flight, result.flight_id, result.flightId, result.adsc_flight_id);
+  }
+
+  for (const candidate of candidates){
+    const key = normaliseFlightCode(candidate);
+    if (key && isLikelyFlightCode(key)) return key;
+  }
+
+  return '';
+}
+
+function getFlightLookupKeyForRow(row){
+  if (!row || typeof row !== 'object') return '';
+  const extracted = extractFlightLookupKey(row.raw || row);
+  if (extracted) return extracted;
+
+  const direct = normaliseFlightCode(String(row.flight || '').trim());
+  return isLikelyFlightCode(direct) ? direct : '';
 }
 
 function extractRouteLookup(obj){
@@ -515,6 +790,31 @@ function extractRouteLookup(obj){
   return null;
 }
 
+function extractRouteSyncOverride(obj){
+  if (!obj || typeof obj !== 'object') return null;
+
+  const candidates = [
+    obj.route_sync_override,
+    obj.routeSyncOverride,
+    obj.raw && typeof obj.raw === 'object' ? obj.raw.route_sync_override : null,
+    obj.raw && typeof obj.raw === 'object' ? obj.raw.routeSyncOverride : null,
+  ];
+
+  for (const candidate of candidates){
+    if (!candidate || typeof candidate !== 'object') continue;
+    const pair = extractAirportPair(candidate.origin, candidate.destination) || parseICAORoutePair(candidate.route);
+    if (pair) {
+      return {
+        origin: pair.origin,
+        destination: pair.destination,
+        route: `${pair.origin}-${pair.destination}`,
+      };
+    }
+  }
+
+  return null;
+}
+
 function isValidICAOCode(value){
   return typeof value === 'string' && /^[A-Z]{4}$/.test(value.trim().toUpperCase());
 }
@@ -530,6 +830,17 @@ function parseICAORoutePair(value){
   const match = value.trim().toUpperCase().match(/^([A-Z]{4})-([A-Z]{4})$/);
   if (!match) return null;
   return { origin: match[1], destination: match[2] };
+}
+
+function parseICAORouteCodes(value){
+  if (typeof value !== 'string') return [];
+  const trimmed = value.trim().toUpperCase();
+  if (!trimmed) return [];
+
+  const codes = trimmed.split('-').map((part) => part.trim()).filter(Boolean);
+  if (codes.length < 2) return [];
+  if (!codes.every((code) => /^[A-Z]{4}$/.test(code))) return [];
+  return codes;
 }
 
 function extractAirportPair(originValue, destinationValue){
@@ -555,9 +866,15 @@ function extractAirportPairFromObject(obj, originKeys, destinationKeys){
 function extractParsedRoutePair(obj){
   if (!obj || typeof obj !== 'object') return null;
 
-  const messageFlight = obj.message && typeof obj.message === 'object' ? obj.message.flight : null;
-  const messagePair = extractAirportPairFromObject(messageFlight, ['departing_airport'], ['destination_airport']);
+  const overridePair = extractRouteSyncOverride(obj);
+  if (overridePair) return overridePair;
+
+  const messageObj = obj.message && typeof obj.message === 'object' ? obj.message : null;
+  const messagePair = extractAirportPairFromObject(messageObj, ['origin', 'origin_icao', 'departing_airport'], ['destination', 'destination_airport', 'dest_icao']);
   if (messagePair) return messagePair;
+
+  const messageRoutePair = messageObj ? parseICAORoutePair(messageObj.route) : null;
+  if (messageRoutePair) return messageRoutePair;
 
   const directPair = extractAirportPairFromObject(obj, ['origin', 'origin_icao'], ['destination', 'dest_icao']);
   if (directPair) return directPair;
@@ -584,20 +901,169 @@ function getRouteDisplayState(row){
   const routeUpdatedAt = String(routeLookup?.updatetime || '').trim();
   const lookupPair = parseICAORoutePair(routeValue);
   const parsedPair = extractParsedRoutePair(row?.raw || row);
+  const parsedRouteValue = parsedPair ? `${parsedPair.origin}-${parsedPair.destination}` : '';
+  const primaryRouteValue = routeValue || parsedRouteValue;
+  const routeCodes = parseICAORouteCodes(primaryRouteValue);
   const hasComparableRoute = !!(lookupPair && parsedPair);
   const routeMismatch = hasComparableRoute && (
     lookupPair.origin !== parsedPair.origin ||
     lookupPair.destination !== parsedPair.destination
   );
+  const showAirportLegNames = !!routeValue;
 
   return {
     routeValue,
     routeUpdatedAt,
     lookupPair,
     parsedPair,
+    parsedRouteValue,
+    airportLegNames: showAirportLegNames ? routeCodes.map((code) => sanitiseAirportDisplayName(getAirportNameByCode(code))).filter(Boolean) : [],
+    primaryRouteValue,
+    primaryRouteSource: routeValue ? 'saved' : (parsedRouteValue ? 'parsed' : ''),
     routeMismatch,
     isUnixLikeUpdateTime: routeUpdatedAt.startsWith('1')
   };
+}
+
+function extractLogDate(row){
+  const candidates = [
+    row?.timestamp,
+    row?.raw?.timestamp,
+    row?.raw?.message?.timestamp,
+  ];
+
+  for (const candidate of candidates){
+    let trimmed = '';
+    if (typeof candidate === 'string') {
+      trimmed = candidate.trim();
+    } else if (typeof candidate === 'number' && Number.isFinite(candidate)) {
+      trimmed = String(candidate);
+    }
+    if (!trimmed) continue;
+
+    const directMatch = trimmed.match(/^(\d{4}-\d{2}-\d{2})/);
+    if (directMatch) return directMatch[1];
+
+    const unixMatch = trimmed.match(/^\d+(?:\.\d+)?$/);
+    if (unixMatch) {
+      const numeric = Number(trimmed);
+      if (Number.isFinite(numeric)) {
+        const millis = numeric > 1e12 ? numeric : numeric * 1000;
+        const parsedUnix = new Date(millis);
+        if (!Number.isNaN(parsedUnix.getTime())) {
+          return parsedUnix.toISOString().slice(0, 10);
+        }
+      }
+    }
+
+    const parsed = new Date(trimmed);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed.toISOString().slice(0, 10);
+    }
+  }
+
+  return '';
+}
+
+function buildRouteSavePayload(row){
+  const flight = getFlightLookupKeyForRow(row);
+  const pair = extractParsedRoutePair(row?.raw || row);
+  const updateTime = extractLogDate(row);
+  if (!flight || !pair || !updateTime) return null;
+  return {
+    flight,
+    route: `${pair.origin}-${pair.destination}`,
+    updatetime: updateTime,
+  };
+}
+
+function applyRouteRecordToRow(row, record){
+  if (!row || typeof row !== 'object') return;
+
+  const lookup = record && typeof record === 'object'
+    ? {
+        route: String(record.route || '').trim(),
+        updatetime: String(record.updatetime || '').trim(),
+      }
+    : null;
+  const hasLookup = lookup && (lookup.route || lookup.updatetime);
+  const overridePair = hasLookup ? parseICAORoutePair(lookup.route) : null;
+  const override = overridePair
+    ? { origin: overridePair.origin, destination: overridePair.destination, route: `${overridePair.origin}-${overridePair.destination}` }
+    : null;
+
+  row.routeLookup = hasLookup ? lookup : null;
+  row.routeSyncOverride = override;
+
+  if (row.raw && typeof row.raw === 'object'){
+    row.raw.routeLookup = row.routeLookup;
+    row.raw.route_lookup = row.routeLookup;
+    row.raw.routeSyncOverride = override;
+    row.raw.route_sync_override = override;
+  }
+}
+
+function applyRouteRecordToFlightRows(flightKey, record){
+  let updated = 0;
+  for (const row of rows){
+    if (getFlightLookupKeyForRow(row) !== flightKey) continue;
+    applyRouteRecordToRow(row, record);
+    updated += 1;
+  }
+  return updated;
+}
+
+async function fetchRouteRecord(flightKey){
+  const response = await fetch(`${getRouteAPIBase()}/api/flightroute?flight=${encodeURIComponent(flightKey)}`);
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
+async function refreshRouteForRow(row){
+  const flightKey = getFlightLookupKeyForRow(row);
+  if (!flightKey) {
+    alert('Nema flight ključa za route refresh.');
+    return;
+  }
+
+  setRouteAPIStatus(`Route API: refresh ${flightKey}...`, false);
+  const record = await fetchRouteRecord(flightKey);
+  const updated = applyRouteRecordToFlightRows(flightKey, record);
+  recomputeFilterAndRender();
+
+  if (record) {
+    setRouteAPIStatus(`Route API: refreshed ${flightKey} on ${updated} row(s) • ${String(routeAPIConfig?.db_path || '').trim() || getRouteAPIBase()}`, false);
+  } else {
+    setRouteAPIStatus(`Route API: no saved route for ${flightKey} • ${String(routeAPIConfig?.db_path || '').trim() || getRouteAPIBase()}`, false);
+  }
+}
+
+async function saveRouteForRow(row){
+  const payload = buildRouteSavePayload(row);
+  if (!payload) {
+    alert('Za upis su potrebni flight, parsirani origin/destination i datum loga.');
+    return;
+  }
+
+  setRouteAPIStatus(`Route API: saving ${payload.flight} ${payload.route}...`, false);
+  const response = await fetch(`${getRouteAPIBase()}/api/flightroute`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `HTTP ${response.status}`);
+  }
+
+  const record = await response.json();
+  const updated = applyRouteRecordToFlightRows(payload.flight, record);
+  recomputeFilterAndRender();
+  setRouteAPIStatus(`Route API: saved ${payload.route} for ${payload.flight} on ${updated} row(s) • ${String(routeAPIConfig?.db_path || '').trim() || getRouteAPIBase()}`, false);
 }
 
 function escapeHtml(s){
@@ -1063,10 +1529,32 @@ function applyData(newRows){
   recomputeFilterAndRender();
 }
 
+function extractRowSearchText(row){
+  const candidates = [
+    row?.raw?.message?.text,
+    row?.raw?.message?.msg_text,
+    row?.raw?.text,
+    row?.raw?.msg_text,
+    row?.message?.text,
+    row?.message?.msg_text,
+    row?.text,
+    row?.msg_text,
+  ];
+
+  for (const candidate of candidates){
+    if (typeof candidate !== 'string') continue;
+    const trimmed = candidate.trim();
+    if (trimmed) return trimmed;
+  }
+
+  return '';
+}
+
 function recomputeFilter(){
   const q = document.getElementById('q').value.trim().toLowerCase();
   const lbl = document.getElementById('label').value;
   const typ = document.getElementById('type').value;
+  const searchTextOnly = document.getElementById('searchTextOnly').checked;
   const onlyCoords = document.getElementById('onlyCoords').checked;
   const onlyFlight = document.getElementById('onlyFlight').checked;
 
@@ -1080,7 +1568,9 @@ function recomputeFilter(){
     if (typ && r.type !== typ) continue;
     if (q){
       const routeText = `${r.routeLookup?.route || ''} ${r.routeLookup?.updatetime || ''}`.trim();
-      const hay = `${r.tail} ${flightDisplay} ${r.label} ${r.type} ${routeText} ${r.summary}`.toLowerCase();
+      const hay = searchTextOnly
+        ? extractRowSearchText(r).toLowerCase()
+        : `${r.tail} ${flightDisplay} ${r.label} ${r.type} ${routeText} ${r.summary}`.toLowerCase();
       if (!hay.includes(q)) continue;
     }
     idx.push(i);
@@ -1113,16 +1603,112 @@ function recomputeFilterAndRender(){
   renderPage();
 }
 
+function buildMessageSummaryText(row){
+  const parts = [];
+  if (row?.summary) parts.push(row.summary);
+  if (isNum(row?.lat) && isNum(row?.lon)) parts.push(`lat ${row.lat}, lon ${row.lon}`);
+  return parts.join(' • ');
+}
+
+function shouldCollapseMessageSummary(text){
+  const normalised = String(text || '').replace(/\r\n/g, '\n').trim();
+  if (!normalised) return false;
+  const logicalLines = normalised.split('\n').length;
+  return logicalLines > MESSAGE_PREVIEW_LINES || normalised.length > 1400;
+}
+
+function getVisibleRowIndices(){
+  const ps = pageSize();
+  const start = page * ps;
+  const end = Math.min(filteredIdx.length, start + ps);
+  return filteredIdx.slice(start, end);
+}
+
+function getExpandableVisibleRowIndices(){
+  return getVisibleRowIndices().filter((rowIndex) => shouldCollapseMessageSummary(buildMessageSummaryText(rows[rowIndex])));
+}
+
+function areVisibleMessagesExpanded(){
+  const visible = getExpandableVisibleRowIndices();
+  return visible.length > 0 && visible.every((rowIndex) => expandedMessageRows.has(rowIndex));
+}
+
+function updateToggleAllMessagesButton(){
+  const button = document.getElementById('toggleAllMessages');
+  if (!button) return;
+
+  const visible = getExpandableVisibleRowIndices();
+  const allExpanded = visible.length > 0 && visible.every((rowIndex) => expandedMessageRows.has(rowIndex));
+  button.disabled = visible.length === 0;
+  button.textContent = allExpanded ? 'Skupi sve' : 'Raširi sve';
+  button.title = allExpanded
+    ? 'Skupi sve vidljive poruke na 18 redova'
+    : 'Raširi sve vidljive poruke komplet';
+}
+
+function toggleAllVisibleMessages(){
+  const visible = getExpandableVisibleRowIndices();
+  if (!visible.length) return;
+
+  if (visible.every((rowIndex) => expandedMessageRows.has(rowIndex))) {
+    for (const rowIndex of visible) expandedMessageRows.delete(rowIndex);
+  } else {
+    for (const rowIndex of visible) expandedMessageRows.add(rowIndex);
+  }
+
+  renderPage();
+}
+
+function applyMessageSummaryExpansion(code, button, expanded){
+  code.classList.toggle('is-collapsed', !expanded);
+  button.textContent = expanded ? '▾' : '▸';
+  button.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  button.title = expanded ? 'Skupi poruku na 18 redova' : 'Raširi poruku komplet';
+}
+
+function makeMessageSummaryBlock(rowIndex){
+  const row = rows[rowIndex];
+  const text = buildMessageSummaryText(row);
+  const wrapper = document.createElement('div');
+  wrapper.className = 'message-summary';
+
+  const code = document.createElement('code');
+  code.className = 'message-summary-code';
+  code.textContent = text;
+
+  if (!shouldCollapseMessageSummary(text)) {
+    wrapper.appendChild(code);
+    return wrapper;
+  }
+
+  const layout = document.createElement('div');
+  layout.className = 'message-summary-row';
+
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'btn-mini btn-mini-secondary message-expand-toggle';
+
+  const expanded = expandedMessageRows.has(rowIndex);
+  applyMessageSummaryExpansion(code, button, expanded);
+
+  button.addEventListener('click', () => {
+    if (expandedMessageRows.has(rowIndex)) expandedMessageRows.delete(rowIndex);
+    else expandedMessageRows.add(rowIndex);
+    applyMessageSummaryExpansion(code, button, expandedMessageRows.has(rowIndex));
+    updateToggleAllMessagesButton();
+  });
+
+  layout.appendChild(button);
+  layout.appendChild(code);
+  wrapper.appendChild(layout);
+  return wrapper;
+}
+
 function makeDetailsCell(rowIndex){
   const r = rows[rowIndex];
   const wrap = document.createElement('div');
 
-  const header = document.createElement('div');
-  header.className = 'message-summary';
-  const parts = [];
-  if (r.summary) parts.push(r.summary);
-  if (isNum(r.lat) && isNum(r.lon)) parts.push(`lat ${r.lat}, lon ${r.lon}`);
-  header.innerHTML = `<code>${escapeHtml(parts.join(" • "))}</code>`;
+  const header = makeMessageSummaryBlock(rowIndex);
   wrap.appendChild(header);
 
    const messageLabel = String(
@@ -3178,19 +3764,42 @@ function renderPage(){
     const routeDisplay = getRouteDisplayState(r);
     const routeValue = routeDisplay.routeValue;
     const routeUpdatedAt = routeDisplay.routeUpdatedAt;
-    if (flightDisplay || routeValue || routeUpdatedAt){
+    if (flightDisplay || routeDisplay.primaryRouteValue || routeUpdatedAt){
       const flightWrap = document.createElement('div');
       if (flightDisplay){
         const flightMain = document.createElement('div');
-        flightMain.className = 'routecell-main';
-        flightMain.textContent = flightDisplay;
+        flightMain.className = 'routecell-main routecell-mainline';
+
+        const flightText = document.createElement('span');
+        flightText.textContent = flightDisplay;
+        flightMain.appendChild(flightText);
+
+        if (routeDisplay.primaryRouteSource) {
+          const badge = document.createElement('span');
+          badge.className = `route-source-badge route-source-badge-${routeDisplay.primaryRouteSource}`;
+          badge.textContent = routeDisplay.primaryRouteSource;
+          flightMain.appendChild(badge);
+        }
+
         flightWrap.appendChild(flightMain);
       }
-      if (routeValue){
+      if (routeDisplay.primaryRouteValue) {
         const routeMain = document.createElement('div');
-        routeMain.className = routeDisplay.routeMismatch ? 'routecell-sub routecell-alert' : 'routecell-sub';
-        routeMain.textContent = routeValue;
+        routeMain.className = routeDisplay.routeMismatch && routeValue ? 'routecell-sub routecell-alert' : 'routecell-sub';
+        routeMain.textContent = routeDisplay.primaryRouteValue;
         flightWrap.appendChild(routeMain);
+      }
+      for (const airportName of routeDisplay.airportLegNames || []) {
+        const airportLine = document.createElement('div');
+        airportLine.className = 'routecell-airport';
+        airportLine.textContent = airportName;
+        flightWrap.appendChild(airportLine);
+      }
+      if (routeDisplay.routeMismatch && routeValue && routeDisplay.parsedRouteValue) {
+        const routeCandidate = document.createElement('div');
+        routeCandidate.className = 'routecell-sub routecell-candidate';
+        routeCandidate.textContent = `parsed candidate: ${routeDisplay.parsedRouteValue}`;
+        flightWrap.appendChild(routeCandidate);
       }
       if (routeUpdatedAt){
         const routeSub = document.createElement('div');
@@ -3208,12 +3817,65 @@ function renderPage(){
 
     const tdM = document.createElement('td');
     const rowWaypoints = getWaypointsFromRow(r);
+    const mapActions = document.createElement('div');
+    mapActions.className = 'map-action-stack';
     if ((isNum(r.lat) && isNum(r.lon)) || rowWaypoints.length){
       const btn = document.createElement('button');
       btn.className = 'btn-mini';
       btn.textContent = 'Prikaži na mapi';
       btn.addEventListener('click', () => openMapForRow(r));
-      tdM.appendChild(btn);
+      mapActions.appendChild(btn);
+    }
+
+    const routeActionRow = document.createElement('div');
+    routeActionRow.className = 'map-action-row';
+    const routePayload = buildRouteSavePayload(r);
+    const flightKey = getFlightLookupKeyForRow(r);
+
+    if (routePayload) {
+      const saveBtn = document.createElement('button');
+      saveBtn.className = 'btn-mini btn-mini-secondary';
+      saveBtn.textContent = 'Upiši';
+      saveBtn.title = `Upiši rutu ${routePayload.route} za ${routePayload.flight}`;
+      saveBtn.addEventListener('click', async () => {
+        saveBtn.disabled = true;
+        try {
+          await saveRouteForRow(r);
+        } catch (err) {
+          setRouteAPIStatus(`Route API: save failed for ${routePayload.flight}`, true);
+          alert('Upis rute nije uspio: ' + err);
+        } finally {
+          saveBtn.disabled = false;
+        }
+      });
+      routeActionRow.appendChild(saveBtn);
+    }
+
+    if (flightKey) {
+      const reloadBtn = document.createElement('button');
+      reloadBtn.className = 'btn-mini btn-mini-secondary';
+      reloadBtn.textContent = 'Reload';
+      reloadBtn.title = `Osveži route lookup za ${flightKey}`;
+      reloadBtn.addEventListener('click', async () => {
+        reloadBtn.disabled = true;
+        try {
+          await refreshRouteForRow(r);
+        } catch (err) {
+          setRouteAPIStatus(`Route API: refresh failed for ${flightKey}`, true);
+          alert('Route refresh nije uspio: ' + err);
+        } finally {
+          reloadBtn.disabled = false;
+        }
+      });
+      routeActionRow.appendChild(reloadBtn);
+    }
+
+    if (routeActionRow.childNodes.length) {
+      mapActions.appendChild(routeActionRow);
+    }
+
+    if (mapActions.childNodes.length) {
+      tdM.appendChild(mapActions);
     } else {
       tdM.innerHTML = '<span class="kvmini">—</span>';
     }
@@ -3255,6 +3917,7 @@ function renderPage(){
 
   updatePageInfo();
   updateSortHeaders();
+  updateToggleAllMessagesButton();
   document.getElementById('subtitle').textContent =
     `Showing rows ${start+1}-${end} of ${filteredIdx.length} (filtered)`;
 }
@@ -3287,13 +3950,30 @@ document.getElementById('waypointsFile').addEventListener('change', async (ev) =
   }
 });
 
-for (const id of ['q','label','type','onlyCoords','onlyFlight','pageSize']){
+document.getElementById('airportsFile').addEventListener('change', async (ev) => {
+  const f = ev.target.files && ev.target.files[0];
+  if (!f) return;
+  try {
+    const text = await f.text();
+    const lookup = parseAirportLookupJSON(text);
+    if (!lookup.size){
+      alert('Airports file did not contain any usable airport names.');
+      return;
+    }
+    installAirportLookup(lookup, f.name || 'airports file');
+  } catch (e) {
+    alert('Failed to load airports.json: ' + e);
+  }
+});
+
+for (const id of ['q','searchTextOnly','label','type','onlyCoords','onlyFlight','pageSize']){
   document.getElementById(id).addEventListener('input', () => { page = 0; recomputeFilterAndRender(); });
   document.getElementById(id).addEventListener('change', () => { page = 0; recomputeFilterAndRender(); });
 }
 
 document.getElementById('reset').addEventListener('click', () => {
   document.getElementById('q').value = '';
+  document.getElementById('searchTextOnly').checked = true;
   document.getElementById('label').value = '';
   document.getElementById('type').value = '';
   document.getElementById('onlyCoords').checked = false;
@@ -3307,7 +3987,12 @@ document.getElementById('thTimestamp').addEventListener('click', () => toggleSor
 document.getElementById('thTail').addEventListener('click', () => toggleSort('tail'));
 document.getElementById('thFlight').addEventListener('click', () => toggleSort('flight'));
 document.getElementById('thDetails').addEventListener('click', () => toggleSort('details'));
+document.getElementById('toggleAllMessages').addEventListener('click', (ev) => {
+  ev.stopPropagation();
+  toggleAllVisibleMessages();
+});
 updateSortHeaders();
+updateToggleAllMessagesButton();
 
 document.getElementById('prev').addEventListener('click', () => { page--; clampPage(); renderPage(); });
 document.getElementById('next').addEventListener('click', () => { page++; clampPage(); renderPage(); });
@@ -3328,6 +4013,8 @@ document.getElementById('mapModal').addEventListener('click', (ev) => {
 });
 
 tryLoadDefaultWaypointLookup();
+tryLoadDefaultAirportLookup();
+refreshRouteAPIConfig();
 
 </script>
 </body>

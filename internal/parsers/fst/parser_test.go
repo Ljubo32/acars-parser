@@ -38,8 +38,8 @@ func TestFST01FixedFormat(t *testing.T) {
 			windKts: 12,
 			windKmh: 22,
 			windDir: 262,
-			heading: 291,
-			track:   297,
+			heading: 297,
+			track:   291,
 			gsKts:   462,
 			gsKmh:   855,
 		},
@@ -56,8 +56,8 @@ func TestFST01FixedFormat(t *testing.T) {
 			windKts: 5,
 			windKmh: 9,
 			windDir: 205,
-			heading: 290,
-			track:   295,
+			heading: 295,
+			track:   290,
 			gsKts:   464,
 			gsKmh:   859,
 		},
@@ -73,9 +73,9 @@ func TestFST01FixedFormat(t *testing.T) {
 			temp:    -62,
 			windKts: 17,
 			windKmh: 31,
-			windDir: 71,
-			heading: 291,
-			track:   293,
+			windDir: 251,
+			heading: 293,
+			track:   291,
 			gsKts:   468,
 			gsKmh:   866,
 		},
@@ -91,11 +91,29 @@ func TestFST01FixedFormat(t *testing.T) {
 			temp:    -56,
 			windKts: 31,
 			windKmh: 57,
-			windDir: 80,
-			heading: 133,
-			track:   131,
+			windDir: 260,
+			heading: 131,
+			track:   133,
 			gsKts:   509,
 			gsKmh:   942,
+		},
+		{
+			name:    "suffix_before_temperature_still_uses_compact_heading_and_track",
+			input:   "FST01EGLLOMAAN418071E0214075390 245 145M 57C 3828713613851713682504540050",
+			origin:  "EGLL",
+			dest:    "OMAA",
+			route:   "EGLL-OMAA",
+			lat:     41.8071,
+			lon:     21.4075,
+			fl:      390,
+			temp:    57,
+			windKts: 38,
+			windKmh: 70,
+			windDir: 287,
+			heading: 138,
+			track:   136,
+			gsKts:   517,
+			gsKmh:   957,
 		},
 	}
 
@@ -128,6 +146,36 @@ func TestFST01FixedFormat(t *testing.T) {
 	}
 }
 
+func TestFST01SuffixVariantDoesNotReuseLegacyHeadingHeuristics(t *testing.T) {
+	parser := &Parser{}
+	msg := &acars.Message{Text: "FST01EGLLOMAAN418071E0214075390 245 145M 57C 3828713613851713682504540050"}
+	res := parser.Parse(msg)
+	result, ok := res.(*Result)
+	if !ok {
+		t.Fatalf("Expected *Result, got %T", res)
+	}
+
+	assertIntEqual(t, "heading", result.Heading, 138)
+	assertIntEqual(t, "track", result.Track, 136)
+	assertIntEqual(t, "unknown1", result.Unknown1, 0)
+}
+
+func TestFST01CombinedTemperatureDecodesA350WindDirection(t *testing.T) {
+	parser := &Parser{}
+	msg := &acars.Message{Text: "FST01EGLLRJTTN448927E0252277370 692 203 M51C045098113111537 21461106"}
+	res := parser.Parse(msg)
+	result, ok := res.(*Result)
+	if !ok {
+		t.Fatalf("Expected *Result, got %T", res)
+	}
+
+	assertStringEqual(t, "route", result.Route, "EGLL-RJTT")
+	assertIntEqual(t, "wind_direction", result.WindDirection, 278)
+	assertIntEqual(t, "track", result.Track, 113)
+	assertIntEqual(t, "heading", result.Heading, 111)
+	assertIntEqual(t, "ground_speed_kts", result.GroundSpeedKts, 537)
+}
+
 func TestFSTLegacyFormatStillParses(t *testing.T) {
 	parser := &Parser{}
 	msg := &acars.Message{Text: "FST01EGLCEIDWN51420W00049317803270072M020C014331258256370"}
@@ -141,8 +189,23 @@ func TestFSTLegacyFormatStillParses(t *testing.T) {
 	assertStringEqual(t, "origin", result.Origin, "EGLC")
 	assertStringEqual(t, "destination", result.Destination, "EIDW")
 	assertStringEqual(t, "route", result.Route, "EGLC-EIDW")
-	assertFloatEqual(t, "latitude", result.Latitude, 5.1420)
+	assertFloatEqual(t, "latitude", result.Latitude, 51.4200)
 	assertFloatEqual(t, "longitude", result.Longitude, -0.4931)
+}
+
+func TestFSTFiveDigitLatitudeKeepsCorrectScale(t *testing.T) {
+	parser := &Parser{}
+	msg := &acars.Message{Text: "FST01HECAEGLLN46976E0170812380  54  80     27013      441  20011809"}
+	res := parser.Parse(msg)
+	result, ok := res.(*Result)
+	if !ok {
+		t.Fatalf("Expected *Result, got %T", res)
+	}
+
+	assertStringEqual(t, "route", result.Route, "HECA-EGLL")
+	assertFloatEqual(t, "latitude", result.Latitude, 46.9760)
+	assertFloatEqual(t, "longitude", result.Longitude, 17.0812)
+	assertIntEqual(t, "flight_level", result.FlightLevel, 380)
 }
 
 func TestFSTJSONHidesRedundantFields(t *testing.T) {

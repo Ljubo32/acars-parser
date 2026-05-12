@@ -28,6 +28,8 @@ import (
 
 	"acars_parser/internal/acars"
 	"acars_parser/internal/airlines"
+	"acars_parser/internal/airports"
+	"acars_parser/internal/flightrouteapi"
 	_ "acars_parser/internal/parsers" // register all parsers via init()
 	"acars_parser/internal/patterns"
 	"acars_parser/internal/registry"
@@ -39,8 +41,10 @@ var (
 	pdcDestinationRe  = regexp.MustCompile(`\bCLRD\s+TO\s+([A-Z]{4})\b`)
 	fsmHeaderRe       = regexp.MustCompile(`(?s)/[A-Z]+\.[A-Z0-9]+/FSM\s+\d{4}\s+\d{6}\s+([A-Z]{4})\s+([A-Z0-9]{3,8})\b`)
 	iniMetadataRe     = regexp.MustCompile(`(?i)INI(\d{2})(\d{2})(\d{4})\s+([A-Z]{3}\d{1,4}[A-Z]?)\s*/\d{2}/([A-Z]{4})/([A-Z]{4})\b`)
+	iniIDMetadataRe   = regexp.MustCompile(`(?i)^INI/ID[0-9A-Z]+,([^,]+),[^/]*/MR\d+,[^/]*/(?:AF)?([A-Z]{4}),([A-Z]{4})/TD(\d{2})(\d{4}),`)
 	raFlightNumberRe  = regexp.MustCompile(`\bFLIGHT\s+NUMBER:\s*([A-Z0-9]{2,10}(?:/[A-Z0-9]{2,10})?)\b`)
 	raSectorRe        = regexp.MustCompile(`\bSECTOR:\s*([A-Z]{4})-([A-Z]{4})\b`)
+	raOFPInfoRe       = regexp.MustCompile(`(?is)\bOFP\s+INFO\b\s+([A-Z0-9]{2,10})\s+([A-Z]{3})-([A-Z]{3})\b`)
 )
 
 type ExtractOut struct {
@@ -80,13 +84,16 @@ type Stats struct {
 func usage(w io.Writer) {
 	fmt.Fprintln(w, "acars_parser (extract) - commands:")
 	fmt.Fprintln(w, "  extract  - parse JSONL or JAERO TXT file and output JSON or text")
+	fmt.Fprintln(w, "  routeapi - serve a local FlightRoute write/read API for the HTML viewer")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  acars_parser extract -input messages.jsonl [-output out.json] [-pretty] [-all] [-stats] [-format json|text]")
+	fmt.Fprintln(w, "  acars_parser routeapi [-db gui/flightroute.sqb] [-port 8765]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Notes:")
 	fmt.Fprintln(w, "  - Input may be JSONL (one JSON object per line) or a JAERO TXT log.")
 	fmt.Fprintln(w, "  - For dumpvdl2/dumphfdl logs, the tool will try to find label/text in nested paths.")
+	fmt.Fprintln(w, "  - routeapi adds CORS headers so the standalone HTML viewer can call it from file: or localhost.")
 	fmt.Fprintln(w, "")
 }
 
@@ -99,12 +106,26 @@ func main() {
 	switch cmd {
 	case "extract":
 		runExtract(os.Args[2:])
+	case "routeapi":
+		runRouteAPI(os.Args[2:])
 	case "-h", "--help", "help":
 		usage(os.Stdout)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", cmd)
 		usage(os.Stderr)
 		os.Exit(2)
+	}
+}
+
+func runRouteAPI(args []string) {
+	fs := flag.NewFlagSet("routeapi", flag.ExitOnError)
+	dbPath := fs.String("db", "gui/flightroute.sqb", "SQLite FlightRoute database path")
+	port := fs.Int("port", 8765, "HTTP port for the local FlightRoute API")
+	_ = fs.Parse(args)
+
+	if err := flightrouteapi.Run(*dbPath, *port); err != nil {
+		fmt.Fprintf(os.Stderr, "FlightRoute API error: %v\n", err)
+		os.Exit(1)
 	}
 }
 
@@ -615,10 +636,10 @@ func enrichMessageFromText(msg *acars.Message) {
 		msg.Flight.Flight = airlines.TranslateFlight(strings.TrimSpace(flightNumber))
 	}
 	if strings.TrimSpace(msg.Flight.DepartingAirport) == "" && departingAirport != "" {
-		msg.Flight.DepartingAirport = strings.TrimSpace(departingAirport)
+		msg.Flight.DepartingAirport = airports.NormaliseCode(departingAirport)
 	}
 	if strings.TrimSpace(msg.Flight.DestinationAirport) == "" && destinationAirport != "" {
-		msg.Flight.DestinationAirport = strings.TrimSpace(destinationAirport)
+		msg.Flight.DestinationAirport = airports.NormaliseCode(destinationAirport)
 	}
 	normaliseMessageFlight(msg)
 }
@@ -725,8 +746,17 @@ func parseFSMMetadataFromText(text string) (flightNumber string, departingAirpor
 
 func parseINIMetadataFromText(text string) (flightNumber string, departingAirport string, destinationAirport string) {
 	text = strings.TrimSpace(strings.ToUpper(text))
-	if text == "" || !strings.Contains(text, "INI01") {
+	if text == "" || (!strings.Contains(text, "INI01") && !strings.Contains(text, "INI/ID")) {
 		return "", "", ""
+	}
+
+	if match := iniIDMetadataRe.FindStringSubmatch(text); len(match) == 6 {
+		flightNumber = strings.TrimSpace(match[1])
+		departingAirport = strings.TrimSpace(match[2])
+		destinationAirport = strings.TrimSpace(match[3])
+		if len(departingAirport) == 4 && len(destinationAirport) == 4 && flightNumber != "" {
+			return flightNumber, departingAirport, destinationAirport
+		}
 	}
 
 	match := iniMetadataRe.FindStringSubmatch(text)
@@ -746,32 +776,45 @@ func parseINIMetadataFromText(text string) (flightNumber string, departingAirpor
 
 func parseRAFlightMetadataFromText(text string) (flightNumber string, departingAirport string, destinationAirport string) {
 	text = strings.TrimSpace(strings.ToUpper(text))
-	if text == "" || !strings.Contains(text, "FLIGHT NUMBER:") {
+	if text == "" {
 		return "", "", ""
 	}
 
-	if match := raFlightNumberRe.FindStringSubmatch(text); len(match) == 2 {
-		flightNumber = strings.TrimSpace(match[1])
-		if strings.Contains(flightNumber, "/") {
-			parts := strings.SplitN(flightNumber, "/", 2)
-			if len(parts) == 2 && strings.TrimSpace(parts[1]) != "" {
-				flightNumber = strings.TrimSpace(parts[1])
-			} else {
-				flightNumber = strings.TrimSpace(parts[0])
+	if strings.Contains(text, "FLIGHT NUMBER:") {
+		if match := raFlightNumberRe.FindStringSubmatch(text); len(match) == 2 {
+			flightNumber = strings.TrimSpace(match[1])
+			if strings.Contains(flightNumber, "/") {
+				parts := strings.SplitN(flightNumber, "/", 2)
+				if len(parts) == 2 && strings.TrimSpace(parts[1]) != "" {
+					flightNumber = strings.TrimSpace(parts[1])
+				} else {
+					flightNumber = strings.TrimSpace(parts[0])
+				}
 			}
 		}
+
+		if match := raSectorRe.FindStringSubmatch(text); len(match) == 3 {
+			departingAirport = strings.TrimSpace(match[1])
+			destinationAirport = strings.TrimSpace(match[2])
+		}
+
+		if flightNumber == "" {
+			return "", "", ""
+		}
+
+		return flightNumber, departingAirport, destinationAirport
 	}
 
-	if match := raSectorRe.FindStringSubmatch(text); len(match) == 3 {
-		departingAirport = strings.TrimSpace(match[1])
-		destinationAirport = strings.TrimSpace(match[2])
-	}
-
-	if flightNumber == "" {
+	if !strings.Contains(text, "OFP INFO") {
 		return "", "", ""
 	}
 
-	return flightNumber, departingAirport, destinationAirport
+	match := raOFPInfoRe.FindStringSubmatch(text)
+	if len(match) != 4 {
+		return "", "", ""
+	}
+
+	return strings.TrimSpace(match[1]), strings.TrimSpace(match[2]), strings.TrimSpace(match[3])
 }
 
 func newOutputMessage(msg *acars.Message) *OutputMessage {
@@ -896,6 +939,9 @@ func decodeToMessage(b []byte) ([]*acars.Message, string) {
 	if err := json.Unmarshal(b, &m); err == nil {
 		var flatRoot map[string]any
 		if err := json.Unmarshal(b, &flatRoot); err == nil {
+			if nestedMsgs := buildMessagesFromNested(flatRoot); len(nestedMsgs) > 0 {
+				return nestedMsgs, "nested"
+			}
 			enrichMessageFlight(&m, flatRoot)
 		}
 		if strings.TrimSpace(m.Label) != "" || strings.TrimSpace(m.Text) != "" {
@@ -998,6 +1044,10 @@ func buildMessagesFromNested(obj any) []*acars.Message {
 		}
 	}
 
+	if syntheticATNCM := buildSyntheticATNCMMessage(root); syntheticATNCM != nil {
+		msgs = append(msgs, syntheticATNCM)
+	}
+
 	if len(msgs) == 0 {
 		if synthetic := buildSyntheticHFDLDataMessage(root); synthetic != nil {
 			msgs = append(msgs, synthetic)
@@ -1005,6 +1055,43 @@ func buildMessagesFromNested(obj any) []*acars.Message {
 	}
 
 	return msgs
+}
+
+func buildSyntheticATNCMMessage(root map[string]any) *acars.Message {
+	departingAirport := strings.TrimSpace(firstString(root,
+		"vdl2.avlc.x25.clnp.cotp.x225_spdu.x227_apdu.context_mgmt.cm_aircraft_message.data.atn_context_mgmt_logon_request.departure_airport",
+	))
+	destinationAirport := strings.TrimSpace(firstString(root,
+		"vdl2.avlc.x25.clnp.cotp.x225_spdu.x227_apdu.context_mgmt.cm_aircraft_message.data.atn_context_mgmt_logon_request.destination_airport",
+	))
+	if departingAirport == "" || destinationAirport == "" {
+		return nil
+	}
+
+	flight := extractFlight(root)
+	if flight == nil {
+		return nil
+	}
+
+	meta := extractNestedMessageMetadata(root)
+	textParts := []string{"ATN CM LOGON"}
+	if flightID := strings.TrimSpace(flight.ID); flightID != "" {
+		textParts = append(textParts, flightID)
+	}
+	textParts = append(textParts, strings.ToUpper(departingAirport)+"-"+strings.ToUpper(destinationAirport))
+
+	msg := &acars.Message{
+		Label:     "ATNCM",
+		Text:      strings.Join(textParts, " "),
+		Tail:      meta.tail,
+		Timestamp: meta.timestamp,
+		Frequency: meta.frequency,
+		Source:    meta.source,
+		Airframe:  meta.airframe,
+		Flight:    flight,
+	}
+	normaliseMessageFlight(msg)
+	return msg
 }
 
 type nestedMessageMeta struct {

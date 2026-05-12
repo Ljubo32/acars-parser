@@ -11,6 +11,7 @@ import (
 )
 
 var iniRe = regexp.MustCompile(`(?i)INI(\d{2})(\d{2})(\d{4})\s+([A-Z]{3}\d{1,4}[A-Z]?)\s*/\d{2}/([A-Z]{4})/([A-Z]{4})\b`)
+var iniIDRouteRe = regexp.MustCompile(`(?i)^INI/ID[0-9A-Z]+,([^,]+),[^/]*/MR\d+,[^/]*/(AF)?([A-Z]{4}),([A-Z]{4})/TD(\d{2})(\d{4}),`)
 
 // Result represents a parsed INI message.
 type Result struct {
@@ -38,11 +39,12 @@ func init() {
 }
 
 func (p *Parser) Name() string     { return "ini" }
-func (p *Parser) Labels() []string { return []string{"RA"} }
+func (p *Parser) Labels() []string { return nil }
 func (p *Parser) Priority() int    { return 40 }
 
 func (p *Parser) QuickCheck(text string) bool {
-	return strings.Contains(strings.ToUpper(text), "INI01")
+	upper := strings.ToUpper(text)
+	return strings.Contains(upper, "INI01") || strings.Contains(upper, "INI/ID")
 }
 
 func (p *Parser) Parse(msg *acars.Message) registry.Result {
@@ -50,7 +52,12 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 		return nil
 	}
 
-	match := iniRe.FindStringSubmatch(strings.ToUpper(strings.TrimSpace(msg.Text)))
+	upperText := strings.ToUpper(strings.TrimSpace(msg.Text))
+	if result := parseINIIDMessage(msg, upperText); result != nil {
+		return result
+	}
+
+	match := iniRe.FindStringSubmatch(upperText)
 	if len(match) != 7 {
 		return nil
 	}
@@ -76,6 +83,43 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 		ReportTime:  reportTime,
 		Origin:      match[5],
 		Destination: match[6],
+		RawData:     msg.Text,
+	}
+}
+
+func parseINIIDMessage(msg *acars.Message, upperText string) registry.Result {
+	match := iniIDRouteRe.FindStringSubmatch(upperText)
+	if len(match) != 7 {
+		return nil
+	}
+
+	dayOfMonth, err := strconv.Atoi(match[5])
+	if err != nil {
+		return nil
+	}
+
+	reportTime, ok := parseHHMM(match[6])
+	if !ok {
+		return nil
+	}
+
+	origin := strings.TrimSpace(match[3])
+	destination := strings.TrimSpace(match[4])
+	if origin == "" || destination == "" {
+		return nil
+	}
+
+	return &Result{
+		MsgID:       int64(msg.ID),
+		Timestamp:   msg.Timestamp,
+		Tail:        msg.Tail,
+		MsgType:     "INI",
+		Format:      "INI/ID",
+		Flight:      strings.TrimSpace(match[1]),
+		DayOfMonth:  dayOfMonth,
+		ReportTime:  reportTime,
+		Origin:      origin,
+		Destination: destination,
 		RawData:     msg.Text,
 	}
 }

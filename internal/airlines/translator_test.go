@@ -40,6 +40,7 @@ func TestTranslateFlight(t *testing.T) {
 		{name: "icao also drops leading zeros", input: "THY011", want: "THY11"},
 		{name: "unknown prefix also drops leading zeros", input: "ZZ011", want: "ZZ11"},
 		{name: "numeric prefix translated when present in csv", input: "07123", want: "ORG123"},
+		{name: "gui airline mapping mirrored in backend csv", input: "8S1986", want: "GTR1986"},
 	}
 
 	for _, test := range tests {

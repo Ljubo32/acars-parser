@@ -217,6 +217,8 @@ func parseFST01Fields(result *Result, rest string) bool {
 		return false
 	}
 
+	isA350CompactTemp := false
+
 	flightLevel, err := strconv.Atoi(fields[0])
 	if err != nil {
 		return false
@@ -237,19 +239,23 @@ func parseFST01Fields(result *Result, rest string) bool {
 		}
 		result.Temperature = temp
 		compactField = compact
+		isA350CompactTemp = len(compactField) >= 2 && (compactField[0] == '0' || compactField[0] == '1')
 	}
 
-	windSpeedKts, windDirection, heading, track, groundSpeedKts, ok := parseFST01Compact(compactField)
+	windSpeedKts, windDirection, track, heading, groundSpeedKts, ok := parseFST01Compact(compactField)
 	if !ok {
 		return false
+	}
+	if isA350CompactTemp {
+		windDirection = decodeA350WindDirection(windDirection, track, heading)
 	}
 
 	result.WindSpeedKts = windSpeedKts
 	result.WindSpeedKmh = knotsToKmh(windSpeedKts)
 	result.WindSpeed = result.WindSpeedKmh
 	result.WindDirection = windDirection
-	result.Heading = heading
 	result.Track = track
+	result.Heading = heading
 	result.GroundSpeedKts = groundSpeedKts
 	result.GroundSpeedKmh = knotsToKmh(groundSpeedKts)
 	result.GroundSpeed = result.GroundSpeedKmh
@@ -273,28 +279,28 @@ func populateLegacySpeedAliases(result *Result) {
 	}
 }
 
-func parseFST01Compact(raw string) (windSpeed, windDirection, heading, track, groundSpeed int, ok bool) {
+func parseFST01Compact(raw string) (windSpeed, windDirection, track, heading, groundSpeed int, ok bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return 0, 0, 0, 0, 0, false
 	}
 
 	if wsLen, ok := fst01WindSpeedLengthFromCompact(raw); ok {
-		if windSpeed, windDirection, heading, track, groundSpeed, ok = parseFST01CompactWithWindLength(raw, wsLen); ok {
-			return windSpeed, windDirection, heading, track, groundSpeed, true
+		if windSpeed, windDirection, track, heading, groundSpeed, ok = parseFST01CompactWithWindLength(raw, wsLen); ok {
+			return windSpeed, windDirection, track, heading, groundSpeed, true
 		}
 	}
 
 	// The suffix after the speed/track block is stable in the observed FST01 samples.
 	if wsLen := len(raw) - 26; wsLen >= 1 && wsLen <= 3 {
-		if windSpeed, windDirection, heading, track, groundSpeed, ok = parseFST01CompactWithWindLength(raw, wsLen); ok {
-			return windSpeed, windDirection, heading, track, groundSpeed, true
+		if windSpeed, windDirection, track, heading, groundSpeed, ok = parseFST01CompactWithWindLength(raw, wsLen); ok {
+			return windSpeed, windDirection, track, heading, groundSpeed, true
 		}
 	}
 
 	for _, wsLen := range []int{1, 2, 3} {
-		if windSpeed, windDirection, heading, track, groundSpeed, ok = parseFST01CompactWithWindLength(raw, wsLen); ok {
-			return windSpeed, windDirection, heading, track, groundSpeed, true
+		if windSpeed, windDirection, track, heading, groundSpeed, ok = parseFST01CompactWithWindLength(raw, wsLen); ok {
+			return windSpeed, windDirection, track, heading, groundSpeed, true
 		}
 	}
 
@@ -312,7 +318,7 @@ func fst01WindSpeedLengthFromCompact(raw string) (int, bool) {
 	}
 }
 
-func parseFST01CompactWithWindLength(raw string, wsLen int) (windSpeed, windDirection, heading, track, groundSpeed int, ok bool) {
+func parseFST01CompactWithWindLength(raw string, wsLen int) (windSpeed, windDirection, track, heading, groundSpeed int, ok bool) {
 	if len(raw) < wsLen+12 {
 		return 0, 0, 0, 0, 0, false
 	}
@@ -326,11 +332,11 @@ func parseFST01CompactWithWindLength(raw string, wsLen int) (windSpeed, windDire
 		return 0, 0, 0, 0, 0, false
 	}
 	start += 3
-	if heading, err = strconv.Atoi(raw[start : start+3]); err != nil {
+	if track, err = strconv.Atoi(raw[start : start+3]); err != nil {
 		return 0, 0, 0, 0, 0, false
 	}
 	start += 3
-	if track, err = strconv.Atoi(raw[start : start+3]); err != nil {
+	if heading, err = strconv.Atoi(raw[start : start+3]); err != nil {
 		return 0, 0, 0, 0, 0, false
 	}
 	start += 3
@@ -342,7 +348,7 @@ func parseFST01CompactWithWindLength(raw string, wsLen int) (windSpeed, windDire
 		return 0, 0, 0, 0, 0, false
 	}
 
-	return windSpeed, windDirection, heading, track, groundSpeed, true
+	return windSpeed, windDirection, track, heading, groundSpeed, true
 }
 
 func validFST01CompactValues(windSpeed, windDirection, heading, track, groundSpeed int) bool {
@@ -362,6 +368,50 @@ func validFST01CompactValues(windSpeed, windDirection, heading, track, groundSpe
 		return false
 	}
 	return true
+}
+
+func signedAngleDiff(reference, target int) int {
+	ref := reference % 360
+	if ref < 0 {
+		ref += 360
+	}
+	target = target % 360
+	if target < 0 {
+		target += 360
+	}
+	return ((target - ref + 540) % 360) - 180
+}
+
+func normalizeBearing(value int) int {
+	out := value % 360
+	if out < 0 {
+		out += 360
+	}
+	if out == 0 {
+		return 360
+	}
+	return out
+}
+
+func decodeA350WindDirection(encoded, track, heading int) int {
+	base := normalizeBearing(encoded)
+	drift := signedAngleDiff(heading, track)
+	if drift == 0 {
+		return base
+	}
+
+	alt := normalizeBearing(base + 180)
+	baseSide := signedAngleDiff(heading, base%360)
+	if drift > 0 {
+		if baseSide > 0 {
+			return base
+		}
+		return alt
+	}
+	if baseSide < 0 {
+		return base
+	}
+	return alt
 }
 
 func parseTemperatureField(field string) (int, bool) {
@@ -425,10 +475,23 @@ func parseCoord(coord, dir string) float64 {
 		return 0
 	}
 
-	// Format: decimalni stepeni bez decimalne tačke
-	// Primer: 418071 = 41.8071°, 0214075 = 021.4075° = 21.4075°
+	degreeDigits := 2
+	if dir == "E" || dir == "W" {
+		degreeDigits = 3
+	}
+	if len(coord) <= degreeDigits {
+		return 0
+	}
+
+	scale := 1.0
+	for i := 0; i < len(coord)-degreeDigits; i++ {
+		scale *= 10
+	}
+
+	// Compact FST coordinates omit the decimal separator and vary by field width.
+	// Examples: 46976 -> 46.976, 418071 -> 41.8071, 0170812 -> 17.0812.
 	if val, err := strconv.ParseFloat(coord, 64); err == nil {
-		result := val / 10000.0
+		result := val / scale
 		return applyDir(result, dir)
 	}
 	return 0
