@@ -108,6 +108,7 @@ func TestLoadsheetParsesMultilineFlightAndRouteHeader(t *testing.T) {
 	assertIntEqual(t, "tow", result.TOW, 234287)
 	assertIntEqual(t, "law", result.LAW, 172773)
 	assertIntEqual(t, "tof", result.TOF, 73500)
+	assertIntEqual(t, "tif", result.TIF, 61514)
 }
 
 func TestLoadsheetParsesSlashRouteAndPAXTTLTotal(t *testing.T) {
@@ -216,6 +217,50 @@ func TestLoadsheetParsesCompactAirFranceHeaderAndPAXTTL(t *testing.T) {
 	assertIntEqual(t, "pax", result.PAX, 300)
 	assertIntEqual(t, "zfw", result.ZFW, 214460)
 	assertIntEqual(t, "tow", result.TOW, 251290)
+}
+
+func TestLoadsheetParsesUULoadsheetPAXTotalWithoutSummingCabinSplit(t *testing.T) {
+	parser := &Parser{}
+	msg := &acars.Message{
+		Label: "C1",
+		Text: "QUASRV1UU~1WAB01261206\r\n" +
+			"LOADSHEET FINAL 1206 EDN01\r\n" +
+			"UU277/26 DZARUN F-OLRE 2/11\r\n" +
+			"TLD  41445 UNDLD 29882\r\n" +
+			"DOW 168623 DOI 46.3\r\n" +
+			"ZFW 210068 M239950  L\r\n" +
+			"TOF  21600\r\n" +
+			"TOW 231668 M273700\r\n" +
+			"TIF  12600\r\n" +
+			"LAW 219068 M251290\r\n" +
+			"PAX 391 214/153/13/11\r\n" +
+			"11/27/342 A27.B120.C131.D102\r\n" +
+			"CGO 1/1020 2/1393 3/4995 4/3675\r\n" +
+			"MACTOW  31.5   MACZFW  31.7\r\n" +
+			"MAC FWD-LMT  ACTL   AFT-LMT\r\n" +
+			"TO   16.07   31.51   36.13\r\n" +
+			"CHECKED BY HALIFATOU498A\r\n",
+	}
+
+	parsed := parser.Parse(msg)
+	if parsed == nil {
+		t.Fatal("Parse() returned nil")
+	}
+
+	result, ok := parsed.(*Result)
+	if !ok {
+		t.Fatalf("Parse() returned %T, want *Result", parsed)
+	}
+
+	assertIntEqual(t, "pax", result.PAX, 391)
+	assertIntEqual(t, "zfw", result.ZFW, 210068)
+	assertIntEqual(t, "tow", result.TOW, 231668)
+	assertIntEqual(t, "law", result.LAW, 219068)
+	assertIntEqual(t, "tof", result.TOF, 21600)
+	assertStringEqual(t, "edition", result.Edition, "01")
+	assertStringEqual(t, "crew", result.Crew, "2/11")
+	assertStringEqual(t, "origin", result.Origin, "FMCZ")
+	assertStringEqual(t, "destination", result.Destination, "FMEE")
 }
 
 func TestLoadsheetParsesEmiratesFinalHeaderAndPAXTTL(t *testing.T) {
@@ -462,7 +507,7 @@ func TestLoadsheetParsesInlineCompactRouteHeader(t *testing.T) {
 	assertIntEqual(t, "tow", result.TOW, 322114)
 	assertIntEqual(t, "law", result.LAW, 227214)
 	assertIntEqual(t, "tof", result.TOF, 103200)
-	assertStringEqual(t, "crew", result.Crew, "")
+	assertStringEqual(t, "crew", result.Crew, "3/12")
 }
 
 func TestLoadsheetParsesDateHeaderRouteOnNextLine(t *testing.T) {

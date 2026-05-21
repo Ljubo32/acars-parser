@@ -134,13 +134,24 @@
     user-select: none;
     pointer-events: auto;
   }
+  .pwi-stats-header { flex: 0 0 100%; display: flex; justify-content: flex-end; }
+  .pwi-stats-filter { display: inline-flex; align-items: center; gap: 6px; color: #b7c2cf; }
+  .pwi-stats-select {
+    background: rgba(11, 16, 32, 0.95);
+    color: #dce4ee;
+    border: 1px solid rgba(255,255,255,0.16);
+    border-radius: 4px;
+    padding: 2px 6px;
+    font: inherit;
+  }
+  .pwi-stats-grid { display: flex; flex-wrap: wrap; gap: 8px; }
   /* Each column in the PWI stats panel sizes to its natural content width so that
      waypoint names and flight-level labels are never clipped by the flex container. */
   .pwi-stat-col { flex: none; width: max-content; }
 
   /* Loadsheet statistics overlay — fixed at the bottom-right of the viewport,
      visible whenever the type filter is set to "loadsheet" and there is data
-     with PAX/TOW/TOF values in the current filtered set. */
+     with PAX/TOW/TOF/TIF values in the current filtered set. */
   .loadsheet-stats-panel {
     position: fixed;
     bottom: 10px;
@@ -307,6 +318,7 @@
   <div class="bar">
     <input id="q" type="search" placeholder="Search (tail / label / type / text)..." autocomplete="off">
     <label class="cb"><input id="searchTextOnly" type="checkbox" checked> srch txt</label>
+    <label class="cb"><input id="searchProtocolText" type="checkbox"> CPDLC/ADSC/MIAM</label>
     <select id="label"></select>
     <select id="type"></select>
     <label class="cb"><input id="onlyCoords" type="checkbox"> COORDS</label>
@@ -374,6 +386,7 @@ const MESSAGE_PREVIEW_LINES = 18;
 const expandedMessageRows = new Set();
 const DEFAULT_ROUTE_API_BASE = 'http://127.0.0.1:8765';
 let routeAPIConfig = null;
+const protocolSearchTextCache = new WeakMap();
 
 // Map globals
 let map = null;
@@ -387,6 +400,7 @@ let canvasRenderer = null;
 // the map is opened so the data always matches the current filter result.
 let meteoStatsControl = null;
 let pwiStatsControl = null;
+let pwiSelectedFlightLevel = '';
 
 function isNum(x){
   return (typeof x === 'number') && Number.isFinite(x);
@@ -1119,13 +1133,13 @@ function updateLoadsheetStats() {
   const withTOW = entries.filter(e => e.ls.tow > 0);
   const withTOF = entries.filter(e => e.ls.tof > 0);
 
-  // Load factor score: passengers per tonne of take-off fuel.
+  // Load factor score: passengers per tonne of trip fuel.
   // A higher ratio means more passengers are carried for each tonne of fuel
   // burned — i.e. the flight is commercially efficient.  A lower ratio means
-  // the aircraft is carrying little payload relative to its fuel load.
-  // Only entries with both PAX and TOF available participate.
-  const withScore = entries.filter(e => e.ls.pax > 0 && e.ls.tof > 0);
-  function loadScore(e) { return e.ls.pax / (e.ls.tof / 1000); }
+  // the aircraft is carrying little payload relative to its fuel burn.
+  // Only entries with both PAX and TIF available participate.
+  const withScore = entries.filter(e => e.ls.pax > 0 && e.ls.tif > 0);
+  function loadScore(e) { return e.ls.pax / (e.ls.tif / 1000); }
   function fmtScore(e)  { return loadScore(e).toFixed(1) + '\u202fpax/t'; }
 
   const maxPAX    = dedupeByLabel([...withPAX].sort((a, b) => b.ls.pax - a.ls.pax)).slice(0, LS_TOP_N);
@@ -1163,6 +1177,7 @@ function updateLoadsheetStats() {
 //   3. Fastest wind          (per waypoint — max across all flight levels, in km/h)
 //   4. Coldest flight level  (per FL — the FL with the overall minimum temperature)
 //   5. Windiest flight level (per FL — the FL with the overall maximum wind speed)
+// The first three columns can also be filtered to a specific FL via the drop-down.
 // Rows in columns 1-3 are clickable and fly the map to the waypoint's location.
 // Returns null when no route wind data is available.
 function buildPWIStatsControl(waypointEntries, flEntries) {
@@ -1171,18 +1186,14 @@ function buildPWIStatsControl(waypointEntries, flEntries) {
   if (!withTemp.length && !withWind.length) return null;
 
   const TOP_N = 6;
-  const coldest  = [...withTemp].filter(p => p.minTemp !== null)
-    .sort((a, b) => a.minTemp - b.minTemp).slice(0, TOP_N);
-  const warmest  = [...withTemp].filter(p => p.maxTemp !== null)
-    .sort((a, b) => b.maxTemp - a.maxTemp).slice(0, TOP_N);
-  const fastest  = [...withWind].filter(p => p.maxWind !== null)
-    .sort((a, b) => b.maxWind - a.maxWind).slice(0, TOP_N);
   const coldestFL  = [...flEntries].filter(f => f.minTemp !== null)
     .sort((a, b) => a.minTemp - b.minTemp).slice(0, TOP_N);
   const windiestFL = [...flEntries].filter(f => f.maxWind !== null)
     .sort((a, b) => b.maxWind - a.maxWind).slice(0, TOP_N);
-
-  if (!coldest.length && !fastest.length) return null;
+  const availableFlightLevels = [...new Set(
+    waypointEntries.flatMap(p => [...(p.flStats instanceof Map ? p.flStats.keys() : [])])
+      .filter(fl => Number.isFinite(fl) && fl > 0)
+  )].sort((a, b) => a - b);
 
   function fmtTemp(v) {
     const r = Math.round(v);
@@ -1196,9 +1207,48 @@ function buildPWIStatsControl(waypointEntries, flEntries) {
     return 'FL\u202f' + Math.round(fl);
   }
 
+  function getWaypointRows(selectedFlightLevel) {
+    if (!Number.isFinite(selectedFlightLevel)) {
+      return {
+        coldest: [...withTemp].filter(p => p.minTemp !== null)
+          .sort((a, b) => a.minTemp - b.minTemp).slice(0, TOP_N),
+        warmest: [...withTemp].filter(p => p.maxTemp !== null)
+          .sort((a, b) => b.maxTemp - a.maxTemp).slice(0, TOP_N),
+        fastest: [...withWind].filter(p => p.maxWind !== null)
+          .sort((a, b) => b.maxWind - a.maxWind).slice(0, TOP_N)
+      };
+    }
+
+    const filtered = waypointEntries.map(p => {
+      const flStat = p.flStats instanceof Map ? p.flStats.get(selectedFlightLevel) : null;
+      if (!flStat) return null;
+      return {
+        name: p.name,
+        latlng: p.latlng,
+        minTemp: flStat.minTemp,
+        maxTemp: flStat.maxTemp,
+        maxWind: flStat.maxWind,
+        minWind: flStat.minWind,
+        marker: flStat.marker || p.marker,
+        markerForMinTemp: flStat.markerForMinTemp || flStat.marker || p.marker,
+        markerForMaxTemp: flStat.markerForMaxTemp || flStat.marker || p.marker,
+        markerForMaxWind: flStat.markerForMaxWind || flStat.marker || p.marker,
+      };
+    }).filter(Boolean);
+
+    return {
+      coldest: filtered.filter(p => p.minTemp !== null)
+        .sort((a, b) => a.minTemp - b.minTemp).slice(0, TOP_N),
+      warmest: filtered.filter(p => p.maxTemp !== null)
+        .sort((a, b) => b.maxTemp - a.maxTemp).slice(0, TOP_N),
+      fastest: filtered.filter(p => p.maxWind !== null)
+        .sort((a, b) => b.maxWind - a.maxWind).slice(0, TOP_N)
+    };
+  }
+
   // colPoints maps column index (0-3) to the sorted waypoint entry array so
   // the click handler can resolve the correct entry via [colIdx][rowIdx].
-  const colPoints = [coldest, warmest, fastest];
+  let colPoints = [[], [], []];
 
   // Renders a column whose rows each represent a waypoint (clickable, flies to point).
   function wpColHtml(title, rows, valueFn, colIdx) {
@@ -1232,12 +1282,48 @@ function buildPWIStatsControl(waypointEntries, flEntries) {
   const ctrl = L.control({ position: 'bottomright' });
   ctrl.onAdd = function() {
     const div = L.DomUtil.create('div', 'pwi-stats-panel');
-    div.innerHTML =
-      wpColHtml('Najhladnije',          coldest,  p => fmtTemp(p.minTemp),      0) +
-      wpColHtml('Najtoplije',           warmest,  p => fmtTemp(p.maxTemp),      1) +
-      wpColHtml('Najja\u010di vetar',  fastest,  p => fmtWindKts(p.maxWind),  2) +
-      flColHtml('Najhladniji FL',       coldestFL,  f => fmtTemp(f.minTemp))   +
-      flColHtml('Najvjetrovitiji FL',   windiestFL, f => fmtWindKts(f.maxWind));
+    const header = L.DomUtil.create('div', 'pwi-stats-header', div);
+    let select = null;
+    if (availableFlightLevels.length) {
+      const filterLabel = L.DomUtil.create('label', 'pwi-stats-filter', header);
+      filterLabel.appendChild(document.createTextNode('Prika\u017ei FL'));
+      select = L.DomUtil.create('select', 'pwi-stats-select', filterLabel);
+      select.add(new Option('Svi FL', ''));
+      for (const fl of availableFlightLevels) {
+        select.add(new Option(fmtFL(fl), String(Math.round(fl))));
+      }
+      const initialValue = availableFlightLevels.some(fl => String(Math.round(fl)) === String(pwiSelectedFlightLevel))
+        ? String(pwiSelectedFlightLevel)
+        : '';
+      select.value = initialValue;
+      pwiSelectedFlightLevel = initialValue;
+    }
+    const grid = L.DomUtil.create('div', 'pwi-stats-grid', div);
+
+    function renderGrid() {
+      const selectedFlightLevel = select && select.value !== '' ? coerceNum(select.value) : null;
+      const waypointRows = getWaypointRows(selectedFlightLevel);
+      colPoints = [waypointRows.coldest, waypointRows.warmest, waypointRows.fastest];
+      const flSuffix = Number.isFinite(selectedFlightLevel) ? ` (${fmtFL(selectedFlightLevel)})` : '';
+      grid.innerHTML =
+        wpColHtml(`Najhladnije${flSuffix}`,         waypointRows.coldest, p => fmtTemp(p.minTemp),     0) +
+        wpColHtml(`Najtoplije${flSuffix}`,          waypointRows.warmest, p => fmtTemp(p.maxTemp),     1) +
+        wpColHtml(`Najja\u010di vetar${flSuffix}`, waypointRows.fastest, p => fmtWindKts(p.maxWind), 2) +
+        flColHtml('Najhladniji FL',     coldestFL,  f => fmtTemp(f.minTemp)) +
+        flColHtml('Najvjetrovitiji FL', windiestFL, f => fmtWindKts(f.maxWind));
+    }
+
+    renderGrid();
+    if (!colPoints[0].length && !colPoints[1].length && !colPoints[2].length && !coldestFL.length && !windiestFL.length) {
+      return null;
+    }
+
+    if (select) {
+      select.addEventListener('change', function() {
+        pwiSelectedFlightLevel = select.value;
+        renderGrid();
+      });
+    }
     L.DomEvent.disableScrollPropagation(div);
     L.DomEvent.disableClickPropagation(div);
     div.addEventListener('click', function(e) {
@@ -2055,11 +2141,35 @@ function extractRowSearchText(row){
   return '';
 }
 
+function getRowMessageLabel(row){
+  return String(row?.raw?.message?.label || row?.message?.label || row?.label || '').trim().toUpperCase();
+}
+
+function extractProtocolSearchText(row){
+  if (!row || typeof row !== 'object') return '';
+
+  const cached = protocolSearchTextCache.get(row);
+  if (typeof cached === 'string') return cached;
+
+  const messageLabel = getRowMessageLabel(row);
+  if (!['AA', 'BA', 'A6', 'B6', 'MA'].includes(messageLabel)) {
+    protocolSearchTextCache.set(row, '');
+    return '';
+  }
+
+  const rawText = extractRowSearchText(row);
+  const expandedText = getDisplayRawText(row, messageLabel, rawText);
+  const searchText = typeof expandedText === 'string' ? expandedText.trim() : '';
+  protocolSearchTextCache.set(row, searchText);
+  return searchText;
+}
+
 function recomputeFilter(){
   const q = document.getElementById('q').value.trim().toLowerCase();
   const lbl = document.getElementById('label').value;
   const typ = document.getElementById('type').value;
   const searchTextOnly = document.getElementById('searchTextOnly').checked;
+  const searchProtocolText = document.getElementById('searchProtocolText').checked;
   const onlyCoords = document.getElementById('onlyCoords').checked;
   const onlyFlight = document.getElementById('onlyFlight').checked;
   const onlyRoute = document.getElementById('onlyRoute').checked;
@@ -2077,9 +2187,18 @@ function recomputeFilter(){
     if (typ && r.type !== typ) continue;
     if (q){
       const routeText = `${r.routeLookup?.route || ''} ${r.routeLookup?.updatetime || ''}`.trim();
-      const hay = searchTextOnly
-        ? extractRowSearchText(r).toLowerCase()
-        : `${r.tail} ${flightDisplay} ${r.label} ${r.type} ${routeText} ${r.summary}`.toLowerCase();
+      const hayParts = [];
+      if (searchTextOnly) {
+        hayParts.push(extractRowSearchText(r).toLowerCase());
+      }
+      if (searchProtocolText) {
+        const protocolText = extractProtocolSearchText(r);
+        if (protocolText) hayParts.push(protocolText.toLowerCase());
+      }
+      if (!hayParts.length) {
+        hayParts.push(`${r.tail} ${flightDisplay} ${r.label} ${r.type} ${routeText} ${r.summary}`.toLowerCase());
+      }
+      const hay = hayParts.join(' ');
       if (!hay.includes(q)) continue;
     }
     idx.push(i);
@@ -3877,8 +3996,8 @@ function openMapRows(pts, titleText, openFirstPopup){
     return 0;
   }
 
-  // Maps tail callsign -> polyline/markers, used for click-to-highlight.
-  const polylineByTail = new Map(); // tail -> L.polyline
+  // Maps tail callsign -> polyline metadata, used for click-to-highlight.
+  const polylineByTail = new Map(); // tail -> { layer, baseStyle }
   const markersByTail  = new Map(); // tail -> Array<{cm, baseRadius}>
   let selectedTail = null;
 
@@ -3889,9 +4008,15 @@ function openMapRows(pts, titleText, openFirstPopup){
       restoreTailHighlight(selectedTail);
     }
     selectedTail = tail;
-    const pl = polylineByTail.get(tail);
-    if (pl) {
-      pl.setStyle({ weight: 4, color: '#1d4ed8', opacity: 1.0 });
+    const polylineEntry = polylineByTail.get(tail);
+    if (polylineEntry && polylineEntry.layer) {
+      polylineEntry.layer.setStyle({
+        ...polylineEntry.baseStyle,
+        weight: 4,
+        color: '#1e40af',
+        opacity: 1.0,
+        dashArray: null
+      });
     }
     const entries = markersByTail.get(tail);
     if (entries) {
@@ -3903,9 +4028,9 @@ function openMapRows(pts, titleText, openFirstPopup){
 
   // Restore the track line and markers for the given tail to their default style.
   function restoreTailHighlight(tail) {
-    const pl = polylineByTail.get(tail);
-    if (pl) {
-      pl.setStyle({ weight: 2, color: '#3388ff', opacity: 0.7 });
+    const polylineEntry = polylineByTail.get(tail);
+    if (polylineEntry && polylineEntry.layer) {
+      polylineEntry.layer.setStyle(polylineEntry.baseStyle);
     }
     const entries = markersByTail.get(tail);
     if (entries) {
@@ -4018,15 +4143,16 @@ function openMapRows(pts, titleText, openFirstPopup){
     }
     if (latlngs.length < 2) continue;
 
-    const pl = L.polyline(latlngs, {
+    const baseStyle = {
       pane: 'trackPane',
       interactive: false,
       bubblingMouseEvents: false,
       weight: 2,
       color: '#3388ff',
       opacity: 0.7
-    }).addTo(allLayer);
-    polylineByTail.set(tail, pl);
+    };
+    const pl = L.polyline(latlngs, baseStyle).addTo(allLayer);
+    polylineByTail.set(tail, { layer: pl, baseStyle });
   }
 
   // Draw per-message route waypoint lines (dashed, lighter weight).
@@ -4034,7 +4160,7 @@ function openMapRows(pts, titleText, openFirstPopup){
   // preventing zigzag that would occur if waypoints from multiple messages
   // were joined into one polyline.
   for (const {latlngs, tail} of routeLinesByRow){
-    const routePl = L.polyline(latlngs, {
+    const baseStyle = {
       pane: 'trackPane',
       interactive: false,
       bubblingMouseEvents: false,
@@ -4042,10 +4168,11 @@ function openMapRows(pts, titleText, openFirstPopup){
       color: '#3388ff',
       opacity: 0.5,
       dashArray: '6, 5'
-    }).addTo(allLayer);
+    };
+    const routePl = L.polyline(latlngs, baseStyle).addTo(allLayer);
     // Only register as the tail's polyline if no solid position track exists,
     // so that click-to-highlight targets the solid line where one is present.
-    if (!polylineByTail.has(tail)) polylineByTail.set(tail, routePl);
+    if (!polylineByTail.has(tail)) polylineByTail.set(tail, { layer: routePl, baseStyle });
   }
 
   // Collect meteo data points for the stats panel.
@@ -4164,6 +4291,7 @@ function openMapRows(pts, titleText, openFirstPopup){
               latlng,
               minTemp: null, maxTemp: null,
               maxWind: null, minWind: null,
+              flStats: new Map(),
               marker: cm,
               markerForMinTemp: null,
               markerForMaxTemp: null,
@@ -4203,6 +4331,38 @@ function openMapRows(pts, titleText, openFirstPopup){
               if (!pwiFlStatMap.has(lFL)) pwiFlStatMap.set(lFL, { temps: [], winds: [] });
               if (Number.isFinite(lTemp)) pwiFlStatMap.get(lFL).temps.push(lTemp);
               if (Number.isFinite(lWind)) pwiFlStatMap.get(lFL).winds.push(lWind);
+
+              if (!pwiEntry.flStats.has(lFL)) {
+                pwiEntry.flStats.set(lFL, {
+                  minTemp: null,
+                  maxTemp: null,
+                  maxWind: null,
+                  minWind: null,
+                  marker: cm,
+                  markerForMinTemp: null,
+                  markerForMaxTemp: null,
+                  markerForMaxWind: null
+                });
+              }
+              const flEntry = pwiEntry.flStats.get(lFL);
+              flEntry.marker = cm;
+              if (Number.isFinite(lTemp)) {
+                if (flEntry.minTemp === null || lTemp < flEntry.minTemp) {
+                  flEntry.minTemp = lTemp;
+                  flEntry.markerForMinTemp = cm;
+                }
+                if (flEntry.maxTemp === null || lTemp > flEntry.maxTemp) {
+                  flEntry.maxTemp = lTemp;
+                  flEntry.markerForMaxTemp = cm;
+                }
+              }
+              if (Number.isFinite(lWind)) {
+                if (flEntry.maxWind === null || lWind > flEntry.maxWind) {
+                  flEntry.maxWind = lWind;
+                  flEntry.markerForMaxWind = cm;
+                }
+                if (flEntry.minWind === null || lWind < flEntry.minWind) flEntry.minWind = lWind;
+              }
             }
           }
         }
@@ -4771,7 +4931,7 @@ document.getElementById('airportsFile').addEventListener('change', async (ev) =>
   }
 });
 
-for (const id of ['q','searchTextOnly','label','type','onlyCoords','onlyFlight','onlyRoute','onlyMeteo','pageSize']){
+for (const id of ['q','searchTextOnly','searchProtocolText','label','type','onlyCoords','onlyFlight','onlyRoute','onlyMeteo','pageSize']){
   document.getElementById(id).addEventListener('input', () => { page = 0; recomputeFilterAndRender(); });
   document.getElementById(id).addEventListener('change', () => { page = 0; recomputeFilterAndRender(); });
 }
@@ -4779,6 +4939,7 @@ for (const id of ['q','searchTextOnly','label','type','onlyCoords','onlyFlight',
 document.getElementById('reset').addEventListener('click', () => {
   document.getElementById('q').value = '';
   document.getElementById('searchTextOnly').checked = true;
+  document.getElementById('searchProtocolText').checked = false;
   document.getElementById('label').value = '';
   document.getElementById('type').value = '';
   document.getElementById('onlyCoords').checked = false;

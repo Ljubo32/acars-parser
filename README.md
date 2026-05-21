@@ -54,7 +54,7 @@ acars_parser/
 
 The standalone HTML viewer in [gui/acars_viewer_fast_kv_map_v8.html](gui/acars_viewer_fast_kv_map_v8.html) now supports a waypoint lookup table from [gui/Waypoints.txt](gui/Waypoints.txt). When the parsed JSON contains named waypoints without embedded coordinates, the viewer can resolve those names to latitude/longitude and plot them on the Leaflet map for FPN route waypoints and H1 PWI route-wind waypoint data.
 
-When `Waypoints.txt` contains multiple fixes with the same name in different regions, the viewer now keeps all candidates and chooses the most plausible coordinate using nearby route anchors instead of blindly taking the last duplicate. For H1 PWI route-wind data, repeated fixes across multiple flight levels are also merged into a single map marker popup that lists all available wind and temperature layers for that waypoint.
+When `Waypoints.txt` contains multiple fixes with the same name in different regions, the viewer now keeps all candidates and chooses the most plausible coordinate using nearby route anchors instead of blindly taking the last duplicate. For H1 PWI route-wind data, repeated fixes across multiple flight levels are also merged into a single map marker popup that lists all available wind and temperature layers for that waypoint. The PWI statistics panel on the map now also includes a flight-level drop-down so the coldest point, warmest point, and strongest wind can be inspected for one specific FL from the currently loaded log.
 
 When the viewer is served over HTTP from the `gui/` directory, it will try to load `Waypoints.txt` automatically. When the HTML file is opened directly from disk and the browser blocks sibling-file fetches, use the `Load Waypoints` picker in the viewer to load the same file manually.
 
@@ -79,6 +79,8 @@ When that rendered `route` value is in the ICAO `XXXX-XXXX` format and it does n
 The viewer now always shows a `raw text` details block for non-empty ACARS payload text, including single-line messages. That block no longer relies on any symbol-limit style truncation in the details panel; instead it wraps long lines to the available panel width.
 
 The main search box in the HTML viewer now also has a `srch txt` checkbox. When it is ticked, the search is limited to the JSON `text` or `message.text` payload fields instead of the broader combined row summary. When it is unticked, search behaves as before and scans the wider rendered row content.
+
+The search bar also has an optional `CPDLC/ADSC/MIAM` checkbox. When it is ticked, the query is matched against the expanded decoded detail text that the viewer renders for CPDLC (`AA`/`BA`), ADS-C (`A6`/`B6`), and MIAM (`MA`) messages. If that checkbox is the only narrow-search option enabled, the search stays limited to those decoded protocol messages instead of falling back to the broader row summary.
 
 The main `Summary / Details` column in the HTML viewer also no longer truncates the summary text to a fixed 500-character limit for normal row rendering paths. Long summaries now rely on the existing word wrap in that column instead of being cut off.
 
@@ -152,7 +154,7 @@ The parser also accepts `FINAL01`-style loadsheet headers where the flight and c
 
 The loadsheet parser also accepts airline headers where the `FLIGHT:` field carries the flight and date together, followed by a compact six-letter IATA route, such as `FLIGHT:MU2076/04APR26   SVOPKX B6083`. In that case it extracts `flight: "CES2076"`, `origin: "UUEE"`, and `destination: "ZBAD"` while keeping the usual airline and airport normalisation.
 
-The loadsheet parser also accepts compact inline headers where the flight and a six-letter IATA route share the same line without an explicit date token after the slash count, such as `UU969/04 RUNCDG F-OLRD 3/12`. In that case it extracts `flight: "REU969"`, `origin: "FMEE"`, and `destination: "LFPG"` from the same header line.
+The loadsheet parser also accepts compact inline headers where the flight and a six-letter IATA route share the same line without an explicit date token after the slash count, such as `UU969/04 RUNCDG F-OLRD 3/12`. In that case it extracts `flight: "REU969"`, `origin: "FMEE"`, `destination: "LFPG"`, and `crew: "3/12"` from the same header line.
 
 The loadsheet parser also accepts multiline headers where the flight line carries a slash-date plus a repeated date token before the route appears on the next line, such as `ET863/01APR26 01APR26 EDNO-2` followed by `ADD LUN ...`. In that case it extracts `flight: "ETH863"`, `origin: "HAAB"`, and `destination: "FLLS"`, and it also tolerates edition markers such as `EDNO-2`.
 

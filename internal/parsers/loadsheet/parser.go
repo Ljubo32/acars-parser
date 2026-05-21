@@ -27,6 +27,7 @@ type Result struct {
 	TOW          int    `json:"tow,omitempty"`     // Take Off Weight
 	LAW          int    `json:"law,omitempty"`     // Landing Weight
 	TOF          int    `json:"tof,omitempty"`     // Take Off Fuel
+	TIF          int    `json:"tif,omitempty"`     // Trip Fuel (fuel burned during the trip)
 	PAX          int    `json:"pax,omitempty"`     // Passenger count
 	Crew         string `json:"crew,omitempty"`    // Crew configuration
 	Trim         string `json:"trim,omitempty"`    // Stabiliser trim
@@ -76,7 +77,11 @@ var (
 	tofSlashRe = regexp.MustCompile(`\b(?:TOF|FWT)/(\d+)`)
 	takeOffFuelRe = regexp.MustCompile(`(?im)\bTAKE\s+OFF\s+FUEL\s+(\d+)`)
 
+	// TIF pattern.
+	tifRe = regexp.MustCompile(`\bTIF\s+(\d+)`)
+
 	// PAX patterns - various formats.
+	paxLineTotalRe = regexp.MustCompile(`(?im)^\s*PAX\s+(\d+)\s+\d+(?:/\d+){2,}\s*$`)
 	paxRe = regexp.MustCompile(`\bPAX[/\s]+(\d+)[/\s]*(\d+)?[/\s]*(\d+)?`)
 	paxInlineTTLRe = regexp.MustCompile(`\bPAX(?:[\s/]+\d+){1,4}(?:\s+PAX)?\s+TTL[:\s]+(\d+)\.?`)
 	paxTTLRe       = regexp.MustCompile(`\bPAX\s+TTL[:\s]+(\d+)`)
@@ -90,6 +95,7 @@ var (
 	// Crew pattern.
 	crewRe = regexp.MustCompile(`\bCREW[:\s]+(\d+/\d+(?:/\d+)?)`)
 	crewSlashRe = regexp.MustCompile(`\bCR[EW]/(\d+/\d+(?:/\d+)?)`)
+	compactHeaderCrewRe = regexp.MustCompile(`(?im)^\s*[A-Z0-9]{2,3}\d{3,4}[A-Z]?/\d+\s+[A-Z]{3}[A-Z]{3}\s+[A-Z0-9-]+\s+(\d+/\d+(?:/\d+)?)\s*$`)
 	routeLineCrewRe = regexp.MustCompile(`(?im)^\s*[A-Z]{3}(?:/|\s+)[A-Z]{3}(?:\s+[A-Z0-9-]+){1,3}\s+(\d+/\d+(?:/\d+)?)\s*$`)
 
 	// Trim/stabiliser pattern.
@@ -162,6 +168,9 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 	} else if m := takeOffFuelRe.FindStringSubmatch(text); len(m) > 1 {
 		result.TOF, _ = strconv.Atoi(m[1])
 	}
+	if m := tifRe.FindStringSubmatch(text); len(m) > 1 {
+		result.TIF, _ = strconv.Atoi(m[1])
+	}
 
 	// Extract passenger count.
 	if pax, ok := extractPassengerCount(text); ok {
@@ -172,6 +181,8 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 	if m := crewRe.FindStringSubmatch(text); len(m) > 1 {
 		result.Crew = m[1]
 	} else if m := crewSlashRe.FindStringSubmatch(text); len(m) > 1 {
+		result.Crew = m[1]
+	} else if m := compactHeaderCrewRe.FindStringSubmatch(text); len(m) > 1 {
 		result.Crew = m[1]
 	} else if m := routeLineCrewRe.FindStringSubmatch(text); len(m) > 1 {
 		result.Crew = m[1]
@@ -291,6 +302,10 @@ func extractPassengerCount(text string) (int, bool) {
 		base, _ := strconv.Atoi(m[1])
 		extra, _ := strconv.Atoi(m[2])
 		return base + extra, true
+	}
+	if m := paxLineTotalRe.FindStringSubmatch(text); len(m) > 1 {
+		count, _ := strconv.Atoi(m[1])
+		return count, true
 	}
 	if m := passengerTTLRe.FindStringSubmatch(text); len(m) > 1 {
 		count, _ := strconv.Atoi(m[1])
