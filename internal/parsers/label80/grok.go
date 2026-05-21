@@ -18,9 +18,18 @@ var Formats = []patterns.Format{
 	// Example: QFA123,YSSY,YMML
 	// Groups: flight, origin, dest
 	{
-		Name: "alt_format",
+		Name:    "alt_format",
 		Pattern: `^(?P<flight>[A-Z0-9]+),(?P<origin>{ICAO}),(?P<dest>{ICAO})`,
-		Fields: []string{"flight", "origin", "dest"},
+		Fields:  []string{"flight", "origin", "dest"},
+	},
+	// POS format header.
+	// Example: POSHAAB/DGAA/LATN08406/LONE037312/ALT282/FOB32171/TME0636/...
+	// The full message is parsed field-by-field in parsePOSFields; this
+	// pattern identifies the format and captures origin/destination.
+	{
+		Name:    "pos_header",
+		Pattern: `^POS(?P<origin>{ICAO})/(?P<dest>{ICAO})/LAT`,
+		Fields:  []string{"origin", "dest"},
 	},
 	// Position extraction pattern.
 	// Example: /POS N33.5/W117.5

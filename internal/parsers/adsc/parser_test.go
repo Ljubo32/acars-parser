@@ -434,6 +434,81 @@ func TestParseUplinkPeriodicContractDotlessADSFormat(t *testing.T) {
 	}
 }
 
+func TestParseNoncomplianceNotification(t *testing.T) {
+	// SU-GDS (EgyptAir) noncompliance notification followed by a basic report and
+	// supplementary tags. Ground station MLOCAYA, contract 1, one non-compliant
+	// group: tag 0x0B ("Reporting interval"), reason 0x40 ("Not fully implemented").
+	p := &Parser{}
+	msg := &acars.Message{
+		ID:        999,
+		Timestamp: "2026-05-01T00:00:00Z",
+		Label:     "B6",
+		Text:      "/MLOCAYA.ADS.SU-GDS0501010B4007FAB6B8C891890842081D0E0410E93FFC0DFBA520CA13C9088272FC0188CAA8C908804A29",
+	}
+
+	result := p.Parse(msg)
+	if result == nil {
+		t.Fatal("Parse returned nil")
+	}
+
+	r, ok := result.(*Result)
+	if !ok {
+		t.Fatal("Result is not *Result type")
+	}
+
+	if r.MessageType != "noncompliance" {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("MessageType = %q, want %q; result=%s", r.MessageType, "noncompliance", string(payload))
+	}
+
+	if r.Noncompliance == nil {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("Noncompliance is nil; result=%s", string(payload))
+	}
+
+	if r.Noncompliance.ContractNum != 1 {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("ContractNum = %d, want 1; result=%s", r.Noncompliance.ContractNum, string(payload))
+	}
+
+	if len(r.Noncompliance.Groups) != 1 {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("len(Groups) = %d, want 1; result=%s", len(r.Noncompliance.Groups), string(payload))
+	}
+
+	g := r.Noncompliance.Groups[0]
+	if g.Tag != 0x0B {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("Groups[0].Tag = 0x%02X, want 0x0B; result=%s", g.Tag, string(payload))
+	}
+	if g.Name != "Reporting interval" {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("Groups[0].Name = %q, want %q; result=%s", g.Name, "Reporting interval", string(payload))
+	}
+	if g.ReasonCode != 0x40 {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("Groups[0].ReasonCode = 0x%02X, want 0x40; result=%s", g.ReasonCode, string(payload))
+	}
+	if g.Reason != "Not fully implemented" {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("Groups[0].Reason = %q, want %q; result=%s", g.Reason, "Not fully implemented", string(payload))
+	}
+
+	// The basic report tags that follow the noncompliance notification must also decode.
+	if r.Registration != "SU-GDS" {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("Registration = %q, want %q; result=%s", r.Registration, "SU-GDS", string(payload))
+	}
+	if r.EarthRef == nil {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("EarthRef is nil; result=%s", string(payload))
+	}
+	if r.PredictedRoute == nil || r.PredictedRoute.NextWaypoint == nil {
+		payload, _ := json.Marshal(r)
+		t.Fatalf("PredictedRoute.NextWaypoint is nil; result=%s", string(payload))
+	}
+}
+
 func TestParseDownlinkAirRefMachScale(t *testing.T) {
 	p := &Parser{}
 	msg := &acars.Message{
@@ -471,3 +546,51 @@ func TestParseDownlinkAirRefMachScale(t *testing.T) {
 		t.Fatalf("ADSCFlightID = %q, want %q; result=%s", r.ADSCFlightID, "SIA308", string(payload))
 	}
 }
+
+func TestDecodeMeteo(t *testing.T) {
+	// Test case 1: bytes from a real message (N12020 via PIKCPYA) where the
+	// temperature field contains the ARINC sentinel 0x800 (-2048 in 12-bit
+	// two's complement), meaning "data not available".  The wind speed and
+	// direction decode correctly, but temperature must be flagged as invalid.
+	t.Run("Sentinel 0x800 marks temperature as invalid", func(t *testing.T) {
+		// Meteo bytes extracted from:
+		//   /PIKCPYA.ADS.N12020072872C75F1648CA2DDD1F0C541339DF08200D27D10F8E33088B87A2271C77AAAAC88B80101FB5B0006E02
+		// (tag 0x10, 4 bytes at offset 37-40 of the payload)
+		data := []byte{0x1F, 0xB5, 0xB0, 0x00}
+		m := decodeMeteo(data)
+		if m == nil {
+			t.Fatal("decodeMeteo returned nil")
+		}
+		if math.Abs(m.WindSpeed-31.5) > 0.01 {
+			t.Errorf("WindSpeed = %.2f, want 31.5", m.WindSpeed)
+		}
+		if m.WindDirInvalid {
+			t.Errorf("WindDirInvalid = true, want false")
+		}
+		if math.Abs(m.WindDirection-301.640625) > 0.001 {
+			t.Errorf("WindDirection = %.6f, want 301.640625", m.WindDirection)
+		}
+		if !m.TemperatureInvalid {
+			t.Errorf("TemperatureInvalid = false, want true for 0x800 sentinel")
+		}
+	})
+
+	// Test case 2: bytes constructed so that tempRaw = 0xF21 (-223 signed),
+	// yielding approximately -55.75 °C at 0.25 °C/LSB — a plausible cruising
+	// altitude temperature.  All other fields are zero.
+	t.Run("Valid temperature not flagged as invalid", func(t *testing.T) {
+		// bits = 0x00001E42 → windSpeed=0, windDirInvalid=0, windDir=0, tempRaw=0xF21.
+		data := []byte{0x00, 0x00, 0x1E, 0x42}
+		m := decodeMeteo(data)
+		if m == nil {
+			t.Fatal("decodeMeteo returned nil")
+		}
+		if m.TemperatureInvalid {
+			t.Errorf("TemperatureInvalid = true, want false for raw 0xF21")
+		}
+		if math.Abs(m.Temperature-(-55.75)) > 0.01 {
+			t.Errorf("Temperature = %.4f, want approx -55.75", m.Temperature)
+		}
+	})
+}
+

@@ -1,4 +1,4 @@
-// Package label80 parses Label 80 position messages.
+// Package label80 parses Label 80 and Label 23 position/status messages.
 package label80
 
 import (
@@ -28,7 +28,16 @@ type Result struct {
 	Altitude    int     `json:"altitude,omitempty"`
 	Mach        string  `json:"mach,omitempty"`
 	TAS         int     `json:"tas,omitempty"`
+	TASKmh      int     `json:"tas_kmh,omitempty"` // TAS converted from knots to km/h
 	FuelOnBoard int     `json:"fuel_on_board,omitempty"`
+	ReportTime  string  `json:"report_time,omitempty"` // UTC time of the position report (from TME field)
+	// WindDir is the actual wind direction in degrees (0–359).  Note: a value
+	// of 0° (exactly from North) is indistinguishable from "not set" in JSON
+	// output due to the omitempty tag, which is an accepted limitation.
+	WindDir      int     `json:"wind_dir,omitempty"`
+	WindSpeed    int     `json:"wind_speed,omitempty"`   // wind speed in knots
+	WindSpeedKmh int     `json:"wind_speed_kmh,omitempty"` // wind speed converted to km/h
+	OAT         int     `json:"oat,omitempty"`         // outside air temperature in °C
 	ETA         string  `json:"eta,omitempty"`
 	OutTime     string  `json:"out_time,omitempty"`
 	OffTime     string  `json:"off_time,omitempty"`
@@ -39,7 +48,7 @@ type Result struct {
 func (r *Result) Type() string     { return "position" }
 func (r *Result) MessageID() int64 { return r.MsgID }
 
-// Parser parses Label 80 position messages.
+// Parser parses Label 80 and Label 23 position/status messages.
 type Parser struct{}
 
 // Grok compiler singleton.
@@ -63,7 +72,7 @@ func init() {
 }
 
 func (p *Parser) Name() string     { return "label80" }
-func (p *Parser) Labels() []string { return []string{"80"} }
+func (p *Parser) Labels() []string { return []string{"80", "23"} }
 func (p *Parser) Priority() int    { return 100 }
 
 func (p *Parser) QuickCheck(text string) bool {
@@ -104,6 +113,16 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 			result.OriginName = airports.GetName(result.OriginICAO)
 			result.DestName = airports.GetName(result.DestICAO)
 			result.Tail = strings.TrimPrefix(match.Captures["tail"], ".")
+			foundHeader = true
+
+		case "pos_header":
+			result.OriginICAO = match.Captures["origin"]
+			result.DestICAO = match.Captures["dest"]
+			result.OriginName = airports.GetName(result.OriginICAO)
+			result.DestName = airports.GetName(result.DestICAO)
+			result.MsgType = "POS"
+			// Parse all remaining slash-delimited tokens.
+			parsePOSFields(text, result)
 			foundHeader = true
 
 		case "alt_format":
@@ -192,4 +211,102 @@ func parseLabel80Coord(s string, dir string) float64 {
 		}
 	}
 	return patterns.ParseDecimalCoord(s, dir)
+}
+
+// parsePOSFields parses the slash-delimited fields of a POS format label 80
+// message.  The header field (e.g. "POSHAAB") and the destination field are
+// already handled by the caller via the pos_header grok match; this function
+// processes the remaining tokens.
+//
+// Field definitions:
+//
+//	LAT[NS]{digits}  - latitude, compact decimal (no dot)
+//	LON[EW]{digits}  - longitude, compact decimal (no dot)
+//	ALT{digits}      - flight level (e.g. ALT282 → FL282)
+//	FOB{digits}      - fuel on board in kg
+//	TME{HHMM}        - UTC time of the position report
+//	WND {offset} {speed} - wind: signed offset from 360° (negative) or
+//	                       direct bearing (non-negative), speed in knots
+//	OAT{signed_int}  - outside air temperature in °C
+//	TAS{digits}      - true airspeed in knots; also stored converted to km/h
+//	ETA{HHMM}        - estimated time of arrival
+func parsePOSFields(text string, result *Result) {
+	for _, part := range strings.Split(text, "/") {
+		part = strings.TrimSpace(part)
+
+		switch {
+		case strings.HasPrefix(part, "LAT"):
+			// e.g. "LATN08406" or "LATS08406"
+			rest := part[3:]
+			if len(rest) >= 2 {
+				result.Latitude = parseLabel80Coord(rest[1:], string(rest[0]))
+			}
+
+		case strings.HasPrefix(part, "LON"):
+			// e.g. "LONE037312" or "LONW037312"
+			rest := part[3:]
+			if len(rest) >= 2 {
+				result.Longitude = parseLabel80Coord(rest[1:], string(rest[0]))
+			}
+
+		case strings.HasPrefix(part, "ALT"):
+			if alt, err := strconv.Atoi(part[3:]); err == nil {
+				result.Altitude = alt
+			}
+
+		case strings.HasPrefix(part, "FOB"):
+			if fob, err := strconv.Atoi(part[3:]); err == nil {
+				result.FuelOnBoard = fob
+			}
+
+		case strings.HasPrefix(part, "TME"):
+			// 4-digit HHMM, formatted as HH:MM.
+			t := part[3:]
+			if len(t) == 4 {
+				result.ReportTime = t[0:2] + ":" + t[2:4]
+			}
+
+		case strings.HasPrefix(part, "WND"):
+			// "WND -34 7" or "WND 170 12"
+			// The first token is a signed offset:
+			//   negative → actual_dir = 360 + offset  (e.g. -34 → 326°)
+			//   non-negative → actual_dir = offset     (e.g. 170 → 170°)
+			// The second token is the wind speed in knots.
+			fields := strings.Fields(part[3:])
+			if len(fields) >= 2 {
+				if offset, err := strconv.Atoi(fields[0]); err == nil {
+					if offset < 0 {
+						result.WindDir = 360 + offset
+					} else {
+						result.WindDir = offset
+					}
+				}
+				if speed, err := strconv.Atoi(fields[1]); err == nil {
+					result.WindSpeed = speed
+					// Convert knots to km/h, rounded to the nearest whole number.
+					result.WindSpeedKmh = (speed*1852 + 500) / 1000
+				}
+			}
+
+		case strings.HasPrefix(part, "OAT"):
+			if oat, err := strconv.Atoi(part[3:]); err == nil {
+				result.OAT = oat
+			}
+
+		case strings.HasPrefix(part, "TAS"):
+			if tas, err := strconv.Atoi(part[3:]); err == nil {
+				result.TAS = tas
+				// Convert knots to km/h (1 knot = 1.852 km/h), rounded to
+				// the nearest whole number using integer arithmetic.
+				result.TASKmh = (tas*1852 + 500) / 1000
+			}
+
+		case strings.HasPrefix(part, "ETA"):
+			// 4-digit HHMM, formatted as HH:MM.
+			t := part[3:]
+			if len(t) == 4 {
+				result.ETA = t[0:2] + ":" + t[2:4]
+			}
+		}
+	}
 }

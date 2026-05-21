@@ -17,10 +17,11 @@ import (
 
 // MeteoData contains meteorological information.
 type MeteoData struct {
-	WindSpeed      float64 `json:"wind_speed_kts"`     // Wind speed in knots.
-	WindDirection  float64 `json:"wind_direction_deg"` // True wind direction in degrees.
-	WindDirInvalid bool    `json:"wind_dir_invalid"`   // True if wind direction is invalid.
-	Temperature    float64 `json:"temperature_c"`      // Temperature in Celsius.
+	WindSpeed           float64 `json:"wind_speed_kts"`       // Wind speed in knots.
+	WindDirection       float64 `json:"wind_direction_deg"`   // True wind direction in degrees.
+	WindDirInvalid      bool    `json:"wind_dir_invalid"`     // True if wind direction is invalid.
+	Temperature         float64 `json:"temperature_c"`        // Temperature in Celsius (0.25 °C resolution).
+	TemperatureInvalid  bool    `json:"temperature_invalid"`  // True if temperature data is not available.
 }
 
 // EarthRef contains earth-referenced velocity data (ground track).
@@ -51,6 +52,28 @@ type Waypoint struct {
 type PredictedRoute struct {
 	NextWaypoint     *Waypoint `json:"next_waypoint,omitempty"`
 	NextNextWaypoint *Waypoint `json:"next_next_waypoint,omitempty"`
+}
+
+// NackInfo holds data from a negative acknowledgment (tag 0x04).
+type NackInfo struct {
+	ContractNum int    `json:"contract_num"`
+	ReasonCode  int    `json:"reason_code"`
+	Reason      string `json:"reason"`
+}
+
+// NoncomplianceGroup describes a single non-compliant request group within a
+// noncompliance notification.
+type NoncomplianceGroup struct {
+	Tag        int    `json:"tag"`
+	Name       string `json:"name"`
+	ReasonCode int    `json:"reason_code"`
+	Reason     string `json:"reason"`
+}
+
+// NoncomplianceNotification holds data from a noncompliance notification (tag 0x05).
+type NoncomplianceNotification struct {
+	ContractNum int                  `json:"contract_num"`
+	Groups      []NoncomplianceGroup `json:"groups,omitempty"`
 }
 
 // ContractRequest contains uplink contract request data.
@@ -92,7 +115,9 @@ type Result struct {
 	Latitude          float64          `json:"latitude,omitempty"`
 	Longitude         float64          `json:"longitude,omitempty"`
 	Altitude          int              `json:"altitude,omitempty"`
-	ContractRequest   *ContractRequest `json:"contract_request,omitempty"`
+	ContractRequest   *ContractRequest           `json:"contract_request,omitempty"`
+	Nack              *NackInfo                  `json:"nack,omitempty"`
+	Noncompliance     *NoncomplianceNotification `json:"noncompliance,omitempty"`
 
 	// Enhanced fields from tag parsing.
 	ReportTime     float64         `json:"report_time_sec,omitempty"` // Seconds past the hour.
@@ -414,6 +439,25 @@ func uplinkRequestTagName(tag byte) string {
 	}
 }
 
+// noncomplianceReasonName maps a noncompliance/nack reason code byte to a
+// human-readable name, as defined in ARINC 745 / EUROCAE ED-100A.
+func noncomplianceReasonName(code byte) string {
+	switch code {
+	case 0x00:
+		return "No reason given"
+	case 0x01:
+		return "System not capable"
+	case 0x02:
+		return "Data unavailable"
+	case 0x40:
+		return "Not fully implemented"
+	case 0x80:
+		return "Capacity exceeded"
+	default:
+		return fmt.Sprintf("Unknown (0x%02X)", code)
+	}
+}
+
 func intPtr(value int) *int {
 	return &value
 }
@@ -472,6 +516,11 @@ func parseTag(result *Result, tag byte, data []byte, isFirst bool) int {
 		if len(data) < 2 {
 			return -1
 		}
+		result.Nack = &NackInfo{
+			ContractNum: int(data[0]),
+			ReasonCode:  int(data[1]),
+			Reason:      noncomplianceReasonName(data[1]),
+		}
 		return 2 // Contract number + reason.
 
 	// Noncompliance notification.
@@ -483,7 +532,25 @@ func parseTag(result *Result, tag byte, data []byte, isFirst bool) int {
 			return -1
 		}
 		groupCnt := int(data[1])
-		return 2 + groupCnt*2 // Approximate size.
+		required := 2 + groupCnt*2
+		if len(data) < required {
+			return -1
+		}
+		nc := &NoncomplianceNotification{
+			ContractNum: int(data[0]),
+		}
+		for i := 0; i < groupCnt; i++ {
+			groupTag := data[2+i*2]
+			reasonCode := data[2+i*2+1]
+			nc.Groups = append(nc.Groups, NoncomplianceGroup{
+				Tag:        int(groupTag),
+				Name:       uplinkRequestTagName(groupTag),
+				ReasonCode: int(reasonCode),
+				Reason:     noncomplianceReasonName(reasonCode),
+			})
+		}
+		result.Noncompliance = nc
+		return required
 
 	// Cancel emergency mode.
 	case 0x06:
@@ -748,7 +815,9 @@ func decodeWindDir(raw uint32) float64 {
 }
 
 // decodeTemperature decodes a 12-bit signed temperature value.
-// Field range is -512 to 512 degrees C (but realistically -100 to +60).
+// Resolution is 0.25 °C per LSB. The caller is responsible for checking the
+// sentinel value (0x800 = -2048 two's complement) before calling this function;
+// that value indicates temperature data is not available.
 func decodeTemperature(raw uint32) float64 {
 	// Sign extend 12-bit value.
 	if raw&0x800 != 0 {
@@ -823,15 +892,18 @@ func decodeMeteo(data []byte) *MeteoData {
 	windDirRaw := (bits >> 13) & 0x1FF
 	windDir := decodeWindDir(windDirRaw)
 
-	// Temperature: bits 19-30 (12 bits).
+	// Temperature: bits 19-30 (12 bits), resolution 0.25 °C.
+	// The value 0x800 is the ARINC sentinel meaning "data not available".
 	tempRaw := (bits >> 1) & 0xFFF
+	tempInvalid := tempRaw == 0x800
 	temp := decodeTemperature(tempRaw)
 
 	return &MeteoData{
-		WindSpeed:      windSpeed,
-		WindDirection:  windDir,
-		WindDirInvalid: windDirInvalid != 0,
-		Temperature:    temp,
+		WindSpeed:          windSpeed,
+		WindDirection:      windDir,
+		WindDirInvalid:     windDirInvalid != 0,
+		Temperature:        temp,
+		TemperatureInvalid: tempInvalid,
 	}
 }
 

@@ -54,7 +54,7 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 	}
 
 	fields := strings.Fields(strings.ReplaceAll(msg.Text, "\r", " "))
-	if len(fields) < 5 {
+	if len(fields) < 4 {
 		return nil
 	}
 
@@ -73,20 +73,16 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 	}
 	route := routeCode[:4] + "-" + routeCode[4:]
 
-	lat, ok := parseThousandths(fields[latIndex], 5)
-	if !ok {
-		return nil
+	// Latitude, longitude, and report time may be spread across two separate
+	// fields (positive longitude) or merged into one field (negative longitude,
+	// whose sign character merges the two whitespace-delimited tokens).
+	var latLonTimeStr string
+	if latIndex == lonTimeIndex {
+		latLonTimeStr = strings.TrimSpace(fields[latIndex])
+	} else {
+		latLonTimeStr = strings.TrimSpace(fields[latIndex]) + strings.TrimSpace(fields[lonTimeIndex])
 	}
-
-	lonTime := strings.TrimSpace(fields[lonTimeIndex])
-	if len(lonTime) < 10 {
-		return nil
-	}
-	lon, ok := parseThousandths(lonTime[:6], 6)
-	if !ok {
-		return nil
-	}
-	reportTime, ok := parseTimeHHMM(lonTime[6:10])
+	lat, lon, reportTime, ok := parseLatLonTime(latLonTimeStr)
 	if !ok {
 		return nil
 	}
@@ -139,17 +135,40 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 }
 
 func locateSB01BodyFields(fields []string) (routeCode string, latIndex, lonTimeIndex, payloadIndex int, ok bool) {
-	if len(fields) < 5 {
+	if len(fields) < 4 {
 		return "", 0, 0, 0, false
 	}
 
 	routeToken := strings.TrimSpace(fields[1])
+
+	// Case A: Combined route+sequence in fields[1] — at least 11 chars where
+	// the first 8 are an alphabetic route code.
 	if len(routeToken) >= 11 && isRouteCode(routeToken[:8]) {
-		return routeToken[:8], 2, 3, 4, true
+		if len(fields) >= 5 {
+			// Normal: separate lat (fields[2]) and lonTime (fields[3]).
+			return routeToken[:8], 2, 3, 4, true
+		}
+		// Merged: a negative longitude sign attached the lonTime to the lat
+		// field (fields[2] contains lat+lonTime combined).
+		if len(fields) == 4 {
+			return routeToken[:8], 2, 2, 3, true
+		}
+		return "", 0, 0, 0, false
 	}
 
-	if isRouteCode(routeToken) && len(fields) >= 6 {
-		return routeToken, 3, 4, 5, true
+	// Case B/C: Separate 8-char alphabetic route code in fields[1];
+	// sequence number in fields[2].
+	if isRouteCode(routeToken) {
+		if len(fields) >= 6 {
+			// Normal: separate lat (fields[3]) and lonTime (fields[4]).
+			return routeToken, 3, 4, 5, true
+		}
+		// Merged: a negative longitude sign attached the lonTime to the lat
+		// field (fields[3] contains lat+lonTime combined).
+		if len(fields) == 5 {
+			return routeToken, 3, 3, 4, true
+		}
+		return "", 0, 0, 0, false
 	}
 
 	return "", 0, 0, 0, false
@@ -167,15 +186,45 @@ func isRouteCode(raw string) bool {
 	return true
 }
 
-func parseThousandths(raw string, width int) (float64, bool) {
-	if len(raw) != width {
-		return 0, false
+// parseLatLonTime parses a latitude, longitude, and report time from a
+// concatenated string. The latitude is 5 unsigned or 6 signed digit-characters;
+// the longitude is 6 unsigned or 7 signed digit-characters; the time is always
+// 4 digit-characters. The fields are concatenated without a separator — a
+// leading sign on the longitude (or latitude) serves as the only field-boundary
+// marker when the two tokens have been merged by strings.Fields.
+func parseLatLonTime(s string) (lat, lon float64, reportTime string, ok bool) {
+	// Latitude: optional sign prefix + 5 digits.
+	latEnd := 5
+	if len(s) > 0 && (s[0] == '-' || s[0] == '+') {
+		latEnd = 6
 	}
-	value, err := strconv.Atoi(raw)
+	if len(s) < latEnd {
+		return 0, 0, "", false
+	}
+	latVal, err := strconv.Atoi(s[:latEnd])
 	if err != nil {
-		return 0, false
+		return 0, 0, "", false
 	}
-	return float64(value) / 1000.0, true
+	lat = float64(latVal) / 1000.0
+
+	// Longitude: optional sign prefix + 6 digits.
+	lonStart := latEnd
+	lonEnd := lonStart + 6
+	if lonStart < len(s) && (s[lonStart] == '-' || s[lonStart] == '+') {
+		lonEnd = lonStart + 7
+	}
+	if len(s) < lonEnd+4 {
+		return 0, 0, "", false
+	}
+	lonVal, err := strconv.Atoi(s[lonStart:lonEnd])
+	if err != nil {
+		return 0, 0, "", false
+	}
+	lon = float64(lonVal) / 1000.0
+
+	// Report time: always 4 digit-characters.
+	reportTime, ok = parseTimeHHMM(s[lonEnd : lonEnd+4])
+	return lat, lon, reportTime, ok
 }
 
 func parseTimeHHMM(raw string) (string, bool) {

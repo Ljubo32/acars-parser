@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"acars_parser/internal/acars"
+	"acars_parser/internal/airports"
 	"acars_parser/internal/patterns"
 	"acars_parser/internal/registry"
 )
@@ -34,9 +35,9 @@ type Result struct {
 	Tail        string  `json:"tail,omitempty"`
 	FlightNum   string  `json:"flight_number,omitempty"`
 	DayOfMonth  int     `json:"day_of_month,omitempty"`
-	Route       string  `json:"route,omitempty"`       // IATA pair like YULMIA
-	Origin      string  `json:"origin,omitempty"`      // First 3 chars of route
-	Destination string  `json:"destination,omitempty"` // Last 3 chars of route
+	Route       string  `json:"route,omitempty"`       // ICAO pair like CYYZ-LIRF (dash-separated)
+	Origin      string  `json:"origin,omitempty"`      // ICAO origin code (normalised from IATA)
+	Destination string  `json:"destination,omitempty"` // ICAO destination code (normalised from IATA)
 	ReportTime  string  `json:"report_time,omitempty"`
 	Unknown1    string  `json:"unknown1,omitempty"` // Field after time (110)
 	Latitude    float64 `json:"latitude,omitempty"`
@@ -95,17 +96,23 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 		MsgType:    "AGFSR",
 		Tail:       msg.Tail,
 		FlightNum:  match.Captures["flight"],
-		Route:      match.Captures["route"],
 		ReportTime: match.Captures["time"],
 		Unknown1:   match.Captures["unknown1"],
 		Phase:      match.Captures["phase"],
 	}
 
-	// Extract origin/destination from route.
+	// Extract origin/destination from route and normalise from IATA to ICAO.
+	// The raw route field is a 6-character IATA pair (e.g. "YYZFCO"); split
+	// it into two 3-character codes and convert each to ICAO where possible.
 	route := match.Captures["route"]
 	if len(route) == 6 {
-		result.Origin = route[0:3]
-		result.Destination = route[3:6]
+		origin := airports.NormaliseCode(route[0:3])
+		destination := airports.NormaliseCode(route[3:6])
+		result.Origin = origin
+		result.Destination = destination
+		// Rebuild Route in ICAO form with a dash separator so it is consistent
+		// with the format used by other parsers (e.g. ABS produces "EGGW-EIDW").
+		result.Route = origin + "-" + destination
 	}
 
 	// Parse day.

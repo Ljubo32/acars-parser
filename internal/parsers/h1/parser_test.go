@@ -401,6 +401,125 @@ func TestPWIParseCoordinateLeadingWaypointsWithTemperature(t *testing.T) {
 	}
 }
 
+// TestPWITrailingHashIgnored verifies that a 4-character hex message hash appended
+// directly to the last field of a PWI message does not corrupt the parsed temperature.
+// Real-world example: "...MONOS,107009,490M745250" where "5250" is the ARINC 618 BCC
+// hash; stripACARSHash removes it before parsing, leaving "490M74" → -74 °C.
+func TestPWITrailingHashIgnored(t *testing.T) {
+	msg := &acars.Message{
+		ID:        80,
+		Label:     "H1",
+		Text:      "PWI/TS232419,190326/WD490,ENUGO,265060,490M72.MONOS,107009,490M745250",
+		Timestamp: "2026-05-15T00:00:00Z",
+		Tail:      "TESTHASH",
+	}
+
+	parser := &PWIParser{}
+	res := parser.Parse(msg)
+	if res == nil {
+		t.Fatal("expected parse result, got nil")
+	}
+
+	pwi, ok := res.(*PWIResult)
+	if !ok {
+		t.Fatalf("expected *PWIResult, got %T", res)
+	}
+	if len(pwi.RouteWinds) == 0 {
+		t.Fatal("expected at least one RouteWinds layer")
+	}
+
+	lastLayer := pwi.RouteWinds[len(pwi.RouteWinds)-1]
+	lastWP := lastLayer.Waypoints[len(lastLayer.Waypoints)-1]
+
+	if lastWP.Temperature != -74 {
+		t.Errorf("last waypoint temperature = %d, want -74 (trailing hash must not corrupt the value)", lastWP.Temperature)
+	}
+}
+
+// TestPWITrailingHashInWindField verifies that a 4-character hex message hash does
+// not corrupt the wind speed when appended to the final wind field of a WD section.
+// Real-world example: "...RIVER,077868AD0" where the real wind data is "07786"
+// (dir=077, speed=86 kt) and "8AD0" is the ARINC 618 BCC hash.
+// stripACARSHash removes "8AD0" before parsing, leaving "07786" → dir=77, speed=86.
+func TestPWITrailingHashInWindField(t *testing.T) {
+	msg := &acars.Message{
+		ID:        81,
+		Label:     "H1",
+		Text:      "PWI/WD320,YENZO,07888.RIVER,077868AD0",
+		Timestamp: "2026-05-15T00:00:00Z",
+		Tail:      "TESTHASH2",
+	}
+
+	parser := &PWIParser{}
+	res := parser.Parse(msg)
+	if res == nil {
+		t.Fatal("expected parse result, got nil")
+	}
+
+	pwi, ok := res.(*PWIResult)
+	if !ok {
+		t.Fatalf("expected *PWIResult, got %T", res)
+	}
+	if len(pwi.RouteWinds) == 0 {
+		t.Fatal("expected at least one RouteWinds layer")
+	}
+
+	lastLayer := pwi.RouteWinds[len(pwi.RouteWinds)-1]
+	lastWP := lastLayer.Waypoints[len(lastLayer.Waypoints)-1]
+
+	if lastWP.Waypoint != "RIVER" {
+		t.Fatalf("last waypoint name = %q, want %q", lastWP.Waypoint, "RIVER")
+	}
+	if lastWP.WindDir != 77 {
+		t.Errorf("wind dir = %d, want 77", lastWP.WindDir)
+	}
+	if lastWP.WindSpeed != 86 {
+		t.Errorf("wind speed = %d, want 86 (trailing hash digit must not inflate the speed)", lastWP.WindSpeed)
+	}
+}
+
+// TestPWITrailingHashInWindFieldAllDigit verifies that an all-decimal-digit
+// 4-character hash does not corrupt the wind speed when appended to a 5-character
+// wind field.  Real-world example: "...FEMKO,291389839" where the real wind data is
+// "29138" (dir=291, speed=38 kt) and the hash "9839" is entirely numeric.
+// stripACARSHash removes "9839" before parsing, leaving "29138" → dir=291, speed=38.
+func TestPWITrailingHashInWindFieldAllDigit(t *testing.T) {
+	msg := &acars.Message{
+		ID:        82,
+		Label:     "H1",
+		Text:      "PWI/WD300,CLARZ,29038.FEMKO,291389839",
+		Timestamp: "2026-05-15T00:00:00Z",
+		Tail:      "TESTHASH3",
+	}
+
+	parser := &PWIParser{}
+	res := parser.Parse(msg)
+	if res == nil {
+		t.Fatal("expected parse result, got nil")
+	}
+
+	pwi, ok := res.(*PWIResult)
+	if !ok {
+		t.Fatalf("expected *PWIResult, got %T", res)
+	}
+	if len(pwi.RouteWinds) == 0 {
+		t.Fatal("expected at least one RouteWinds layer")
+	}
+
+	lastLayer := pwi.RouteWinds[len(pwi.RouteWinds)-1]
+	lastWP := lastLayer.Waypoints[len(lastLayer.Waypoints)-1]
+
+	if lastWP.Waypoint != "FEMKO" {
+		t.Fatalf("last waypoint name = %q, want %q", lastWP.Waypoint, "FEMKO")
+	}
+	if lastWP.WindDir != 291 {
+		t.Errorf("wind dir = %d, want 291", lastWP.WindDir)
+	}
+	if lastWP.WindSpeed != 38 {
+		t.Errorf("wind speed = %d, want 38 (all-digit hash must not inflate the speed)", lastWP.WindSpeed)
+	}
+}
+
 func TestH1PosParse_WaypointsWithDashAndNumbers(t *testing.T) {
 	// Test message with waypoints containing dashes and numbers (BUD-01, IRL-02, OPT-03)
 	msg := &acars.Message{

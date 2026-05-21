@@ -2,6 +2,7 @@ package cpdlc
 
 import (
 	"encoding/hex"
+	"fmt"
 	"strings"
 
 	"acars_parser/internal/acars"
@@ -28,6 +29,12 @@ type Result struct {
 	Direction     string           `json:"direction"`    // "uplink" or "downlink".
 	GroundStation string           `json:"ground_station,omitempty"`
 	Registration  string           `json:"registration,omitempty"`
+	// Origin and Destination are the ICAO departure/arrival airport codes extracted
+	// from the first RouteClearance element (dM40/dM41).  They are exposed at the
+	// top level so that the viewer and state extractor can read them without
+	// having to navigate the elements array.
+	Origin        string           `json:"origin,omitempty"`
+	Destination   string           `json:"destination,omitempty"`
 	Header        *MessageHeader   `json:"header,omitempty"`
 	Elements      []MessageElement `json:"elements,omitempty"`
 	FormattedText string           `json:"formatted_text,omitempty"` // Human-readable message.
@@ -140,6 +147,23 @@ func (p *Parser) Parse(msg *acars.Message) registry.Result {
 	result.Header = &cpdlcMsg.Header
 	result.Elements = cpdlcMsg.Elements
 
+	// Extract origin/destination from the first RouteClearance element (dM40/dM41),
+	// if present. This allows the viewer and state extractor to read them at the
+	// top level without navigating the elements array.
+	for _, elem := range cpdlcMsg.Elements {
+		rc, ok := elem.Data.(*RouteClearance)
+		if !ok || rc == nil {
+			continue
+		}
+		if rc.AirportDeparture != "" {
+			result.Origin = rc.AirportDeparture
+		}
+		if rc.AirportDestination != "" {
+			result.Destination = rc.AirportDestination
+		}
+		break
+	}
+
 	// Format the human-readable text.
 	result.FormattedText = formatMessage(cpdlcMsg)
 
@@ -240,27 +264,79 @@ func findCPDLCPayloadStart(text string) (imiStart int, payloadStart int, message
 	return bestIdx, bestPayloadStart, bestType
 }
 
-// formatMessage creates a human-readable summary of the CPDLC message.
+// formatMessage creates a libacars-style hierarchical human-readable representation
+// of the CPDLC message, including the outer structure, header, and per-element detail.
+//
+// Route clearance elements display the label template (e.g. "ASSIGNED ROUTE [ROUTECLEARANCE]")
+// followed by a hierarchical block of route details. All other elements display the
+// substituted text (elem.Text), keeping the output concise.
 func formatMessage(msg *Message) string {
 	if msg == nil || len(msg.Elements) == 0 {
 		return ""
 	}
 
-	// If a free-text element is present, prefer that as the main summary
-	// (this matches what libacars/acarslib typically surfaces for many uplinks/requests).
+	var sb strings.Builder
+
+	sb.WriteString("FANS-1/A CPDLC MESSAGE:\n")
+	switch msg.Direction {
+	case DirectionDownlink:
+		sb.WriteString(" CPDLC DOWNLINK MESSAGE:\n")
+	case DirectionUplink:
+		sb.WriteString(" CPDLC UPLINK MESSAGE:\n")
+	default:
+		sb.WriteString(" CPDLC MESSAGE:\n")
+	}
+	sb.WriteString("  HEADER:\n")
+	sb.WriteString(fmt.Sprintf("   MSG ID: %d\n", msg.Header.MsgID))
+	if msg.Header.MsgRef != nil {
+		sb.WriteString(fmt.Sprintf("   MSG REF: %d\n", *msg.Header.MsgRef))
+	}
+	if msg.Header.Timestamp != nil {
+		sb.WriteString(fmt.Sprintf("   TIMESTAMP: %s\n", msg.Header.Timestamp.String()))
+	}
+	sb.WriteString("  MESSAGE DATA:\n")
+
 	for _, elem := range msg.Elements {
-		if strings.EqualFold(strings.TrimSpace(elem.Label), "[freetext]") && strings.TrimSpace(elem.Text) != "" {
-			return strings.TrimSpace(elem.Text)
+		// Route clearances use the label template as the header and a hierarchical
+		// block below.
+		if rc := routeClearanceFromElement(&elem); rc != nil {
+			label := strings.TrimSpace(strings.ToUpper(elem.Label))
+			sb.WriteString("   " + label + "\n")
+			sb.WriteString(rc.FormatHierarchical("    "))
+			continue
+		}
+
+		// Position reports use the label template as the header and a hierarchical block below.
+		if pr, ok := elem.Data.(*PositionReport); ok && pr != nil {
+			label := strings.TrimSpace(strings.ToUpper(elem.Label))
+			sb.WriteString("   " + label + "\n")
+			sb.WriteString(pr.FormatHierarchical("    "))
+			continue
+		}
+
+		text := strings.TrimSpace(elem.Text)
+		if text == "" {
+			text = strings.TrimSpace(elem.Label)
+		}
+		if text != "" {
+			sb.WriteString("   " + text + "\n")
 		}
 	}
 
-	parts := make([]string, 0, len(msg.Elements))
-	for _, elem := range msg.Elements {
-		if strings.TrimSpace(elem.Text) != "" {
-			parts = append(parts, strings.TrimSpace(elem.Text))
-		} else if strings.TrimSpace(elem.Label) != "" {
-			parts = append(parts, strings.TrimSpace(elem.Label))
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+// routeClearanceFromElement extracts a *RouteClearance from the element data,
+// handling both direct *RouteClearance and the compound map encoding used by
+// multi-field elements (e.g. uM80, uM83).
+func routeClearanceFromElement(elem *MessageElement) *RouteClearance {
+	if rc, ok := elem.Data.(*RouteClearance); ok && rc != nil {
+		return rc
+	}
+	if data, ok := elem.Data.(map[string]interface{}); ok {
+		if rc, ok := data["route_clearance"].(*RouteClearance); ok && rc != nil {
+			return rc
 		}
 	}
-	return strings.Join(parts, "; ")
+	return nil
 }

@@ -40,6 +40,7 @@ import (
 	_ "acars_parser/internal/parsers/landingdata"
 	_ "acars_parser/internal/parsers/loadsheet"
 	_ "acars_parser/internal/parsers/mediaadv"
+	_ "acars_parser/internal/parsers/miam"
 	_ "acars_parser/internal/parsers/pdc"
 	_ "acars_parser/internal/parsers/rep301"
 	_ "acars_parser/internal/parsers/sb01"

@@ -97,6 +97,25 @@ func TestSB01Parse(t *testing.T) {
 			windSpeedKts:  19,
 			windSpeedKmh:  35,
 		},
+		{
+			// Western longitude (negative) has 7 chars including the sign, which
+			// merges the lonTime token with the preceding lat token when
+			// strings.Fields splits on whitespace.  The sequence number is in a
+			// separate field, giving 5 fields total rather than the usual 6.
+			name:          "west_longitude_merged_lat_lontime",
+			text:          "SB0122BA_F-GZNC  KJFKLFPG 54\n54047-0228520130 38002-640319044090/9W017023",
+			registration:  "F-GZNC",
+			route:         "KJFK-LFPG",
+			lat:           54.047,
+			lon:           -22.852,
+			reportTime:    "01:30",
+			altitudeFt:    38002,
+			altitudeM:     11583,
+			temperatureC:  -64.0,
+			windDirection: 319,
+			windSpeedKts:  44,
+			windSpeedKmh:  81,
+		},
 	}
 
 	parser := &Parser{}

@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +32,7 @@ import (
 	"acars_parser/internal/airports"
 	"acars_parser/internal/flightrouteapi"
 	_ "acars_parser/internal/parsers" // register all parsers via init()
+	miampkg "acars_parser/internal/parsers/miam"
 	"acars_parser/internal/patterns"
 	"acars_parser/internal/registry"
 )
@@ -45,7 +47,32 @@ var (
 	raFlightNumberRe  = regexp.MustCompile(`\bFLIGHT\s+NUMBER:\s*([A-Z0-9]{2,10}(?:/[A-Z0-9]{2,10})?)\b`)
 	raSectorRe        = regexp.MustCompile(`\bSECTOR:\s*([A-Z]{4})-([A-Z]{4})\b`)
 	raOFPInfoRe       = regexp.MustCompile(`(?is)\bOFP\s+INFO\b\s+([A-Z0-9]{2,10})\s+([A-Z]{3})-([A-Z]{3})\b`)
+	// jaeroFlightRe matches "FLIGHT <callsign>" at the end of a JAERO C-Band
+	// header line (case-insensitive).  The C-Band format appends the flight
+	// number to the aircraft description, unlike the original JAERO format
+	// which does not include flight numbers in the header.
+	// (?:^|\s+) allows the word FLIGHT to appear at the very start of the
+	// description (when there is no aircraft model text before it).
+	jaeroFlightRe = regexp.MustCompile(`(?i)(?:^|\s+)FLIGHT\s+([A-Z][A-Z0-9]*)\s*$`)
+
+	// jaeroAESRe extracts the ICAO hex address from the AES: field of a JAERO
+	// header line.  The address is used as the per-aircraft key when tracking
+	// MIAM multi-segment reassembly state.
+	jaeroAESRe = regexp.MustCompile(`\bAES:([0-9A-Fa-f]+)\b`)
+
+	// miamFirstSegRe matches the beginning-of-transfer marker in a compressed
+	// MIAM payload.  JAERO/libacars uses this prefix for single-transfer and
+	// first-segment PDUs (e.g. "T22!", "T32!", "T-2!").  Continuation segments
+	// do not start with this pattern.
+	miamFirstSegRe = regexp.MustCompile(`^T[-\d]+!`)
 )
+
+// miamReassemblyWindow is the maximum time gap permitted between consecutive
+// segments of a MIAM multi-packet transfer.  Continuation packets arriving
+// outside this window are treated as orphans (unrelated transfers).
+// Real-world logs show gaps of up to ~10 minutes between a first segment and
+// subsequent continuation frames, so 15 minutes is used as a generous bound.
+const miamReassemblyWindow = 15 * time.Minute
 
 type ExtractOut struct {
 	Message *OutputMessage `json:"message"`
@@ -274,17 +301,96 @@ func processJSONLLine(line string, out []ExtractOut, includeAll bool, st *Stats)
 }
 
 func processJAEROInput(scanner *bufio.Scanner, firstHeader string, out []ExtractOut, includeAll bool, st *Stats) []ExtractOut {
-	currentHeader := strings.TrimSpace(firstHeader)
-	body := make([]string, 0, 8)
+	// Phase 1: collect every block (header + body) into a slice.  This
+	// allows sorting by timestamp so that reassembly works correctly even
+	// when the input file is in reverse chronological order (e.g. JAERO
+	// C-Band logs that are newest-first).
+	type rawBlock struct {
+		header string
+		body   []string
+		ts     time.Time
+		valid  bool // false when the timestamp field cannot be parsed
+	}
 
-	emit := func() {
+	var blocks []rawBlock
+	currentHeader := strings.TrimSpace(firstHeader)
+	currentBody := make([]string, 0, 8)
+
+	addBlock := func() {
 		if currentHeader == "" {
 			return
 		}
 		st.ParsedJAERO++
-		var appended bool
-		var matched bool
-		out, appended, matched = appendJAEROBlock(out, currentHeader, body, includeAll)
+		fields := strings.Fields(currentHeader)
+		blk := rawBlock{header: currentHeader, body: append([]string{}, currentBody...)}
+		if len(fields) >= 3 {
+			if t, err := time.Parse("15:04:05 02-01-06 MST", fields[0]+" "+fields[1]+" "+fields[2]); err == nil {
+				blk.ts = t.UTC()
+				blk.valid = true
+			}
+		}
+		blocks = append(blocks, blk)
+		currentBody = currentBody[:0]
+	}
+
+	for scanner.Scan() {
+		st.Lines++
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+		if looksLikeJAEROHeader(trimmed) {
+			addBlock()
+			currentHeader = trimmed
+			continue
+		}
+		if currentHeader == "" {
+			continue
+		}
+		currentBody = append(currentBody, line)
+	}
+	addBlock()
+
+	// Phase 2: sort blocks into chronological order.  Blocks without a
+	// parseable timestamp are placed at the end, preserving their relative
+	// order (stable sort).
+	sort.SliceStable(blocks, func(i, j int) bool {
+		if !blocks[i].valid {
+			return false
+		}
+		if !blocks[j].valid {
+			return true
+		}
+		return blocks[i].ts.Before(blocks[j].ts)
+	})
+
+	// Phase 3: process blocks in chronological order, tracking per-ICAO
+	// MIAM assembly state for multi-segment transfers.
+	//
+	// The MIAM protocol can split a large compressed payload across multiple
+	// consecutive ACARS frames.  The first frame starts with a "T<n>!"
+	// marker (miamFirstSegRe); subsequent frames do not.  JAERO/libacars
+	// outputs a decoded MIAM block only when it can fully reassemble the
+	// transfer.  When it cannot (e.g. the file starts mid-transfer), those
+	// frames appear with no decoded block.
+	//
+	// Strategy:
+	//   T<n>! frame + decoded MIAM block → single transfer, emit immediately.
+	//   T<n>! frame + no decoded block   → first segment of a multi-packet
+	//                                       transfer; start a per-ICAO
+	//                                       assembly.
+	//   Non-T frame + no decoded block   → continuation segment: append to
+	//                                       the active assembly for this ICAO
+	//                                       if within miamReassemblyWindow,
+	//                                       otherwise treat as an orphan.
+	type miamAssembly struct {
+		header string
+		body   []string
+		ts     time.Time // timestamp of the first segment
+		lastTS time.Time // timestamp of the most recently appended segment
+		conts  []string  // continuation payloads in chronological order
+	}
+	miamState := make(map[string]*miamAssembly)
+
+	emitStats := func(appended, matched bool) {
 		if appended {
 			st.Emitted++
 		}
@@ -294,38 +400,145 @@ func processJAEROInput(scanner *bufio.Scanner, firstHeader string, out []Extract
 		if !appended {
 			st.SkippedNoLabel++
 		}
-		body = body[:0]
 	}
 
-	for scanner.Scan() {
-		st.Lines++
-		line := scanner.Text()
-		trimmed := strings.TrimSpace(line)
-		if looksLikeJAEROHeader(trimmed) {
-			emit()
-			currentHeader = trimmed
-			continue
+	flushAssembly := func(icao string) {
+		asm, ok := miamState[icao]
+		if !ok {
+			return
 		}
-		if currentHeader == "" {
-			continue
-		}
-		body = append(body, line)
+		delete(miamState, icao)
+		var appended, matched bool
+		out, appended, matched = appendJAEROBlock(out, asm.header, asm.body, includeAll, asm.conts)
+		emitStats(appended, matched)
 	}
 
-	emit()
+	for _, blk := range blocks {
+		// The MIAM reassembly only applies to MA-label blocks.  A quick
+		// substring check on the header avoids a full parse for every block.
+		if !strings.Contains(blk.header, " ! MA ") {
+			var appended, matched bool
+			out, appended, matched = appendJAEROBlock(out, blk.header, blk.body, includeAll, nil)
+			emitStats(appended, matched)
+			continue
+		}
+
+		// Extract the ICAO hex address (AES field) for per-aircraft tracking.
+		icao := ""
+		if m := jaeroAESRe.FindStringSubmatch(blk.header); len(m) == 2 {
+			icao = m[1]
+		}
+
+		payload := extractJAEROPayload(blk.body)
+		hasMIAMBlock := extractJAEROMIAMBlock(blk.body) != ""
+		isFirstSeg := miamFirstSegRe.MatchString(payload) && !hasMIAMBlock
+
+		switch {
+		case hasMIAMBlock:
+			// Fully decoded by JAERO (single transfer or last segment).
+			// Close any active assembly for this aircraft and emit normally.
+			flushAssembly(icao)
+			var appended, matched bool
+			out, appended, matched = appendJAEROBlock(out, blk.header, blk.body, includeAll, nil)
+			emitStats(appended, matched)
+
+		case isFirstSeg:
+			// Start a new multi-segment assembly.  Any previous assembly for
+			// this ICAO is flushed first (it timed out or was interrupted).
+			flushAssembly(icao)
+			miamState[icao] = &miamAssembly{
+				header: blk.header,
+				body:   blk.body,
+				ts:     blk.ts,
+				lastTS: blk.ts,
+			}
+
+		default:
+			// Continuation or orphan (no T<n>! prefix, no decoded block).
+			if asm, ok := miamState[icao]; ok && blk.valid && blk.ts.Sub(asm.lastTS) <= miamReassemblyWindow {
+				// Within the window: append this payload to the active assembly.
+				asm.conts = append(asm.conts, payload)
+				asm.lastTS = blk.ts
+			} else {
+				// Orphan: either no active assembly for this ICAO, the time
+				// window has expired, or the timestamp is unparseable.
+				if asm, ok := miamState[icao]; ok && blk.valid && blk.ts.After(asm.lastTS) {
+					// Assembly window has expired; flush the stale assembly.
+					flushAssembly(icao)
+				}
+				var appended, matched bool
+				out, appended, matched = appendJAEROBlock(out, blk.header, blk.body, includeAll, nil)
+				emitStats(appended, matched)
+			}
+		}
+	}
+
+	// Flush all assemblies that were not closed by a subsequent T<n>! block
+	// or a fully-decoded block (e.g. the transfer spans the end of the file).
+	for icao := range miamState {
+		flushAssembly(icao)
+	}
+
 	return out
 }
 
-func appendJAEROBlock(out []ExtractOut, header string, body []string, includeAll bool) ([]ExtractOut, bool, bool) {
+func appendJAEROBlock(out []ExtractOut, header string, body []string, includeAll bool, continuationPayloads []string) ([]ExtractOut, bool, bool) {
 	msg := parseJAEROBlock(header, body)
 	if msg == nil {
 		return out, false, false
 	}
+
+	// For MIAM messages (label MA), JAERO/libacars writes a decoded block below
+	// the raw compressed payload line.  We dispatch the MIAM parser against the
+	// decoded block so the viewer can expand it like CPDLC/ADS-C, while keeping
+	// the original compressed payload in message.text for the default table view.
+	if msg.Label == "MA" {
+		miamText := extractJAEROMIAMBlock(body)
+		if miamText != "" {
+			enrichMessageFromText(msg)
+			miamMsg := *msg
+			miamMsg.Text = miamText
+			results := registry.Default().Dispatch(&miamMsg)
+			if !includeAll && len(results) == 0 {
+				// No parser matched the decoded block; fall back to normal dispatch
+				// against the compressed payload so -all still emits the message.
+				return appendOut(out, msg, includeAll)
+			}
+			rany := make([]any, 0, len(results))
+			for _, r := range results {
+				rany = append(rany, r)
+			}
+			out = append(out, ExtractOut{Message: newOutputMessage(msg), Results: rany})
+			return out, true, len(results) > 0
+		}
+
+		// No decoded MIAM block: check whether continuation payloads have been
+		// assembled by the reassembly logic in processJAEROInput.  When present,
+		// emit a minimal miam_assembled result that exposes the full concatenated
+		// compressed payload for future decoding.
+		if len(continuationPayloads) > 0 {
+			enrichMessageFromText(msg)
+			var sb strings.Builder
+			sb.WriteString(msg.Text)
+			for _, cp := range continuationPayloads {
+				sb.WriteString(cp)
+			}
+			result := &miampkg.Result{
+				Timestamp:        msg.Timestamp,
+				MessageType:      "miam_assembled",
+				SegmentCount:     1 + len(continuationPayloads),
+				AssembledPayload: sb.String(),
+			}
+			out = append(out, ExtractOut{Message: newOutputMessage(msg), Results: []any{result}})
+			return out, true, true
+		}
+	}
+
 	return appendOut(out, msg, includeAll)
 }
 
 func parseJAEROBlock(header string, body []string) *acars.Message {
-	timestamp, tail, label, airframe, ok := parseJAEROHeader(header)
+	timestamp, tail, label, flight, airframe, ok := parseJAEROHeader(header)
 	if !ok {
 		return nil
 	}
@@ -335,7 +548,7 @@ func parseJAEROBlock(header string, body []string) *acars.Message {
 		return nil
 	}
 
-	return &acars.Message{
+	msg := &acars.Message{
 		Source:    "jaero",
 		Timestamp: timestamp,
 		Tail:      tail,
@@ -343,31 +556,74 @@ func parseJAEROBlock(header string, body []string) *acars.Message {
 		Label:     label,
 		Airframe:  airframe,
 	}
+	if flight != "" {
+		msg.Flight = &acars.Flight{Flight: flight}
+	}
+	return msg
 }
 
-func parseJAEROHeader(header string) (string, string, string, *acars.Airframe, bool) {
+// extractJAEROMIAMBlock scans the body lines of a JAERO message block for the
+// MIAM-decoded section that JAERO/libacars appends after the raw payload line.
+// The decoded section begins with a tab-indented "MIAM:" line.  All lines from
+// that point are collected, the single leading tab is stripped from each, and
+// the result is returned as a trimmed string.  An empty string is returned when
+// no MIAM block is found.
+func extractJAEROMIAMBlock(body []string) string {
+	miamStart := -1
+	for i, rawLine := range body {
+		if strings.TrimSpace(rawLine) == "MIAM:" {
+			miamStart = i
+			break
+		}
+	}
+	if miamStart < 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	for i, rawLine := range body[miamStart:] {
+		if i > 0 {
+			sb.WriteByte('\n')
+		}
+		// Strip exactly one leading tab: JAERO indents the whole decoded block
+		// by one tab relative to the rest of the message body.
+		if len(rawLine) > 0 && rawLine[0] == '\t' {
+			sb.WriteString(rawLine[1:])
+		} else {
+			sb.WriteString(rawLine)
+		}
+	}
+
+	return strings.TrimRight(sb.String(), "\n\t ")
+}
+
+// parseJAEROHeader parses a single JAERO header line.  It returns
+// (timestamp, tail, label, flight, airframe, ok).  The flight field is
+// populated when the C-Band format includes a "FLIGHT <callsign>" suffix in
+// the aircraft description; it is empty for the original JAERO format.
+func parseJAEROHeader(header string) (string, string, string, string, *acars.Airframe, bool) {
 	fields := strings.Fields(strings.TrimSpace(header))
 	if len(fields) < 8 || !looksLikeJAEROHeader(header) {
-		return "", "", "", nil, false
+		return "", "", "", "", nil, false
 	}
 
 	parsedTime, err := time.Parse("15:04:05 02-01-06 MST", fields[0]+" "+fields[1]+" "+fields[2])
 	if err != nil {
-		return "", "", "", nil, false
+		return "", "", "", "", nil, false
 	}
 
 	bangIdx := strings.Index(header, " ! ")
 	if bangIdx < 0 {
-		return "", "", "", nil, false
+		return "", "", "", "", nil, false
 	}
 
 	leftFields := strings.Fields(strings.TrimSpace(header[:bangIdx]))
 	if len(leftFields) == 0 {
-		return "", "", "", nil, false
+		return "", "", "", "", nil, false
 	}
 	tail := strings.TrimSpace(leftFields[len(leftFields)-1])
 	if tail == "" {
-		return "", "", "", nil, false
+		return "", "", "", "", nil, false
 	}
 
 	aes := ""
@@ -380,16 +636,24 @@ func parseJAEROHeader(header string) (string, string, string, *acars.Airframe, b
 
 	rightFields := strings.Fields(strings.TrimSpace(header[bangIdx+3:]))
 	if len(rightFields) < 2 {
-		return "", "", "", nil, false
+		return "", "", "", "", nil, false
 	}
 	label := strings.TrimSpace(rightFields[0])
 	if label == "" {
-		return "", "", "", nil, false
+		return "", "", "", "", nil, false
 	}
 
 	airframeDescription := ""
 	if len(rightFields) > 2 {
 		airframeDescription = strings.TrimSpace(strings.Join(rightFields[2:], " "))
+	}
+
+	// Extract the flight number from the C-Band "FLIGHT <callsign>" suffix.
+	flight := ""
+	if match := jaeroFlightRe.FindStringSubmatch(airframeDescription); len(match) == 2 {
+		flight = strings.ToUpper(strings.TrimSpace(match[1]))
+		// Strip " FLIGHT <callsign>" from the aircraft description.
+		airframeDescription = strings.TrimSpace(airframeDescription[:len(airframeDescription)-len(match[0])])
 	}
 
 	var airframe *acars.Airframe
@@ -401,7 +665,7 @@ func parseJAEROHeader(header string) (string, string, string, *acars.Airframe, b
 		}
 	}
 
-	return parsedTime.UTC().Format(time.RFC3339), tail, label, airframe, true
+	return parsedTime.UTC().Format(time.RFC3339), tail, label, flight, airframe, true
 }
 
 func extractJAEROPayload(body []string) string {

@@ -82,6 +82,83 @@
   .leaflet-popup.big-popup .kvbox { max-height: none; }
   .leaflet-popup.big-popup .kvrows { max-width: 100%; }
 
+  /* Meteorological statistics panel (coldest / hottest / windiest). */
+  .meteo-stats-panel {
+    display: flex;
+    gap: 8px;
+    background: rgba(20, 24, 34, 0.90);
+    border: 1px solid rgba(255,255,255,0.13);
+    border-radius: 6px;
+    padding: 6px 8px;
+    color: #dce4ee;
+    font-size: 11px;
+    font-family: 'Courier New', monospace;
+    user-select: none;
+    pointer-events: auto;
+  }
+  .meteo-stat-col { flex: 1; min-width: 110px; }
+  .meteo-stat-heading {
+    font-size: 9.5px;
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: #8da4bf;
+    border-bottom: 1px solid rgba(255,255,255,0.10);
+    margin-bottom: 3px;
+    padding-bottom: 2px;
+  }
+  .meteo-stat-row {
+    cursor: pointer;
+    padding: 2px 3px;
+    border-radius: 3px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .meteo-stat-row:hover { background: rgba(255,255,255,0.11); }
+  .meteo-stat-val  { font-weight: bold; margin-right: 5px; }
+  .meteo-stat-tail { color: #7dc4e4; }
+
+  /* PWI route wind statistics panel — displayed at bottom-right when PWI data is on the map. */
+  .pwi-stats-panel {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    background: rgba(20, 24, 34, 0.90);
+    border: 1px solid rgba(255,255,255,0.13);
+    border-radius: 6px;
+    padding: 6px 8px;
+    color: #dce4ee;
+    font-size: 11px;
+    font-family: 'Courier New', monospace;
+    user-select: none;
+    pointer-events: auto;
+  }
+  /* Each column in the PWI stats panel sizes to its natural content width so that
+     waypoint names and flight-level labels are never clipped by the flex container. */
+  .pwi-stat-col { flex: none; width: max-content; }
+
+  /* Loadsheet statistics overlay — fixed at the bottom-right of the viewport,
+     visible whenever the type filter is set to "loadsheet" and there is data
+     with PAX/TOW/TOF values in the current filtered set. */
+  .loadsheet-stats-panel {
+    position: fixed;
+    bottom: 10px;
+    right: 10px;
+    z-index: 1000;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    background: rgba(20, 24, 34, 0.92);
+    border: 1px solid rgba(255,255,255,0.13);
+    border-radius: 6px;
+    padding: 6px 8px;
+    color: #dce4ee;
+    font-size: 11px;
+    font-family: 'Courier New', monospace;
+    user-select: none;
+  }
+
   .kvtable { width: 100% !important; table-layout: fixed; }
   .kvtable td { background: transparent !important; }
   .kvkey { width: 220px; }
@@ -232,8 +309,10 @@
     <label class="cb"><input id="searchTextOnly" type="checkbox" checked> srch txt</label>
     <select id="label"></select>
     <select id="type"></select>
-    <label class="cb"><input id="onlyCoords" type="checkbox"> only with coords</label>
-    <label class="cb"><input id="onlyFlight" type="checkbox"> only with Flight</label>
+    <label class="cb"><input id="onlyCoords" type="checkbox"> COORDS</label>
+    <label class="cb"><input id="onlyFlight" type="checkbox"> FLIGHT</label>
+    <label class="cb"><input id="onlyRoute" type="checkbox"> RTE</label>
+    <label class="cb"><input id="onlyMeteo" type="checkbox"> METEO</label>
     <label class="cb small">page size
       <select id="pageSize">
         <option value="50">50</option>
@@ -300,6 +379,14 @@ let routeAPIConfig = null;
 let map = null;
 let marker = null;
 let allLayer = null;
+// Shared Leaflet canvas renderer — all circleMarker elements are painted onto
+// a single <canvas> element instead of individual SVG nodes, keeping the DOM
+// size constant regardless of how many markers are plotted.
+let canvasRenderer = null;
+// Leaflet control that displays the meteo statistics panel. Replaced each time
+// the map is opened so the data always matches the current filter result.
+let meteoStatsControl = null;
+let pwiStatsControl = null;
 
 function isNum(x){
   return (typeof x === 'number') && Number.isFinite(x);
@@ -788,6 +875,424 @@ function extractRouteLookup(obj){
   }
 
   return null;
+}
+
+// Returns true when the row contains a decoded route from any parser.
+// The field names mirror the JSON keys used by each Go parser and the state
+// extractor (internal/state/extractor.go).  All known route signals:
+//
+//   result.route              string  — ABS, AGFSR, ATNCM, DIS, EB00, FST, H1, ILNGE7X, PDC, …
+//   result.origin_icao        string  — MIAM (REP / RTR inner messages)
+//   result.waypoints          array   — H1, label10
+//   result.route_waypoints    array   — PDC
+//   CPDLC element data.route_information                 array  — direct RouteClearance
+//   CPDLC element data.route_clearance.route_information array  — combined position+route
+// rowHasMeteo returns true if any parsed result in this row contains
+// meteorological data:
+//   - the ADS-C meteo group (label B6)
+//   - label 80 POS messages that include OAT or wind data
+//   - FST (label 15) flight status messages with temperature or wind data
+// Note: fields stored as int with omitempty are absent from the JSON when
+// their value is zero, so e.g. a true temperature of 0 °C will not be matched.
+function rowHasMeteo(r) {
+  const results = Array.isArray(r?.raw?.results) ? r.raw.results : [];
+  for (const result of results) {
+    if (typeof result !== 'object' || !result) continue;
+    // ADS-C meteo group (label B6, tag 0x09).
+    if (result.meteo != null) return true;
+    // Label 80 POS messages with outside air temperature or wind data.
+    if (result.oat !== undefined || result.wind_speed !== undefined) return true;
+    // FST (label 15) flight status messages and label83 POSRPT.
+    if (result.temperature !== undefined || result.temperature_c !== undefined || result.wind_speed_kts !== undefined) return true;
+  }
+  return false;
+}
+
+// extractMeteoFromRow extracts meteorological data from a row's parsed
+// results and returns a stats entry, or null if no meteo data is present.
+// Supports label 80 POS (integer fields), ADS-C meteo groups (float64),
+// and FST (label 15) flight status messages.
+function extractMeteoFromRow(r, latlng) {
+  const tail = (r.tail || r.registration || '').trim();
+  const results = Array.isArray(r?.raw?.results) ? r.raw.results : [];
+  for (const result of results) {
+    if (typeof result !== 'object' || !result) continue;
+    let oat = null, windSpeedKmh = null, windDir = null;
+
+    // Label 80 POS: integer fields directly on the result object.
+    if (result.oat !== undefined) oat = result.oat;
+    if (result.wind_speed !== undefined) {
+      windSpeedKmh = result.wind_speed_kmh ?? Math.round(result.wind_speed * 1.852);
+      windDir = result.wind_dir ?? null;
+    }
+
+    // FST (label 15) flight status: integer temperature (°C) and pre-calculated
+    // wind speed fields.  label83 POSRPT uses the same wind fields but emits
+    // the temperature as temperature_c.  Note: because Go structs use omitempty
+    // on integers, a true temperature of 0 °C will not be present in the JSON.
+    if (result.temperature   !== undefined) oat = result.temperature;    // FST
+    if (result.temperature_c !== undefined) oat = result.temperature_c;  // POSRPT, rep301, label17
+    if (result.wind_speed_kts !== undefined) {
+      windSpeedKmh = result.wind_speed_kmh ?? Math.round(result.wind_speed_kts * 1.852);
+      windDir = result.wind_direction ?? null;
+    }
+
+    // ADS-C meteo group: nested object with float64 fields.
+    if (result.meteo != null && typeof result.meteo === 'object') {
+      // temperature_invalid is true when the ADS-C 0x800 sentinel is present,
+      // meaning the aircraft reported "data not available" for temperature.
+      if (result.meteo.temperature_c !== undefined && !result.meteo.temperature_invalid) {
+        oat = result.meteo.temperature_c;
+      }
+      if (result.meteo.wind_speed_kts !== undefined && !result.meteo.wind_dir_invalid) {
+        windSpeedKmh = Math.round(result.meteo.wind_speed_kts * 1.852);
+        windDir = result.meteo.wind_direction_deg ?? null;
+      }
+    }
+
+    // Reject physically impossible temperatures — acts as a second line of
+    // defence against decoder errors or malformed data.  The range [-90, 70]°C
+    // covers the full envelope of commercial aircraft operations.
+    if (oat !== null && (oat < -90 || oat > 70)) oat = null;
+
+    if (oat !== null || windSpeedKmh !== null) {
+      return { latlng, tail, timestamp: r.timestamp, oat, windSpeedKmh, windDir };
+    }
+  }
+  return null;
+}
+
+// buildMeteoStatsControl creates a Leaflet control showing the top 4 coldest,
+// hottest, and windiest points from the collected meteo entries.
+// Returns null if no usable data is present.
+// Each row is clickable — the map flies to the point and the marker popup opens.
+function buildMeteoStatsControl(points) {
+  const withOAT  = points.filter(p => p.oat !== null);
+  const withWind = points.filter(p => p.windSpeedKmh !== null);
+  if (!withOAT.length && !withWind.length) return null;
+
+  const coldest  = [...withOAT].sort((a, b) => a.oat - b.oat).slice(0, 4);
+  const hottest  = [...withOAT].sort((a, b) => b.oat - a.oat).slice(0, 4);
+  const windiest = [...withWind].sort((a, b) => b.windSpeedKmh - a.windSpeedKmh).slice(0, 4);
+
+  function fmtOAT(v) {
+    const r = typeof v === 'number' ? Math.round(v) : v;
+    return (r >= 0 ? '+' : '') + r + '\u00b0C';
+  }
+  function fmtWind(p) {
+    let s = p.windSpeedKmh + '\u202fkm/h';
+    if (p.windDir != null && p.windDir !== 0) s = Math.round(p.windDir) + '\u00b0\u2002' + s;
+    return s;
+  }
+  // colIdx identifies which sorted column (0=coldest, 1=hottest, 2=windiest) so
+  // the click handler can look up the point via colPoints[colIdx][rowIdx].
+  function colHtml(title, rows, valueFn, colIdx) {
+    if (!rows.length) return '';
+    let html = `<div class="meteo-stat-col"><div class="meteo-stat-heading">${title}</div>`;
+    for (let i = 0; i < rows.length; i++) {
+      const p = rows[i];
+      const tip = p.tail + (p.timestamp ? ' \u2022 ' + p.timestamp : '');
+      html += `<div class="meteo-stat-row" data-col="${colIdx}" data-row="${i}" title="${escapeHtml(tip)}">` +
+              `<span class="meteo-stat-val">${valueFn(p)}</span>` +
+              `<span class="meteo-stat-tail">${escapeHtml(p.tail || '?')}</span>` +
+              '</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  // Indexed lookup so click handler can retrieve the full point object (with .marker).
+  const colPoints = [coldest, hottest, windiest];
+
+  const ctrl = L.control({ position: 'bottomleft' });
+  ctrl.onAdd = function() {
+    const div = L.DomUtil.create('div', 'meteo-stats-panel');
+    div.innerHTML =
+      colHtml('Najhladnije',         coldest,  p => fmtOAT(p.oat), 0) +
+      colHtml('Najtoplije',          hottest,  p => fmtOAT(p.oat), 1) +
+      colHtml('Najja\u010di vetar', windiest, fmtWind,             2);
+    L.DomEvent.disableScrollPropagation(div);
+    L.DomEvent.disableClickPropagation(div);
+    div.addEventListener('click', function(e) {
+      const row = e.target.closest('[data-col]');
+      if (!row) return;
+      try {
+        const colIdx = parseInt(row.dataset.col, 10);
+        const rowIdx = parseInt(row.dataset.row, 10);
+        const p = colPoints[colIdx]?.[rowIdx];
+        if (!p) return;
+        map.flyTo(p.latlng, Math.max(map.getZoom(), 6), { animate: true, duration: 0.8 });
+        // Open the popup after the fly-to animation completes.
+        if (p.marker) map.once('moveend', () => p.marker.openPopup());
+      } catch (_) {}
+    });
+    return div;
+  };
+  return ctrl;
+}
+
+// =============================================================================
+// Loadsheet statistics overlay
+// =============================================================================
+
+// The number of rows shown per column in the loadsheet stats panel.
+const LS_TOP_N = 16;
+
+// extractLoadsheetResult returns the first loadsheet result object from a row's
+// raw.results array, or null if no loadsheet result is present.
+function extractLoadsheetResult(r) {
+  const results = Array.isArray(r?.raw?.results) ? r.raw.results : [];
+  for (const res of results) {
+    if (res && (res.msg_type === 'LOADSHEET' || res.type === 'LOADSHEET')) {
+      return res;
+    }
+  }
+  return null;
+}
+
+// updateLoadsheetStats rebuilds and shows (or hides) the loadsheet statistics
+// overlay whenever the filtered row set changes.  The overlay is only shown
+// when the type filter is explicitly set to "loadsheet".
+function updateLoadsheetStats() {
+  const overlay = document.getElementById('lsStatsOverlay');
+  if (!overlay) return;
+
+  // Only show the panel when the type filter is set to "LOADSHEET".
+  if (document.getElementById('type').value !== 'LOADSHEET') {
+    overlay.style.display = 'none';
+    return;
+  }
+
+  // Collect all loadsheet result objects from the current filtered set.
+  const entries = [];
+  for (const idx of filteredIdx) {
+    const r = rows[idx];
+    const ls = extractLoadsheetResult(r);
+    if (!ls) continue;
+    entries.push({ ls, r });
+  }
+
+  if (!entries.length) {
+    overlay.style.display = 'none';
+    return;
+  }
+
+  // Determine the display label for a row: prefer flight number, fall back to tail.
+  function rowLabel(e) {
+    return String(e.ls.flight || e.r.flight || e.ls.tail || e.r.tail || '?').trim();
+  }
+
+  // Return a new array keeping only the first occurrence of each flight label.
+  // The caller is responsible for sorting the input before calling this so that
+  // the "best" entry for each flight is the one that survives.
+  function dedupeByLabel(arr) {
+    const seen = new Set();
+    return arr.filter(e => {
+      const key = rowLabel(e);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  // Format weight as tonnes with one decimal place (e.g. 65432 kg → "65.4 t").
+  function fmtTonnes(kg) {
+    if (!kg || kg <= 0) return '\u2014';
+    return (kg / 1000).toFixed(1) + '\u202ft';
+  }
+
+  // Build a single display column as HTML.  Rows are not clickable (no coordinates).
+  function lsCol(title, colEntries, valueFn) {
+    if (!colEntries.length) return '';
+    let html = `<div class="pwi-stat-col"><div class="meteo-stat-heading">${title}</div>`;
+    for (const e of colEntries) {
+      html += `<div class="meteo-stat-row" style="cursor:default">` +
+              `<span class="meteo-stat-val">${valueFn(e)}</span>` +
+              `<span class="meteo-stat-tail">${escapeHtml(rowLabel(e))}</span>` +
+              '</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  const withPAX = entries.filter(e => e.ls.pax > 0);
+  const withTOW = entries.filter(e => e.ls.tow > 0);
+  const withTOF = entries.filter(e => e.ls.tof > 0);
+
+  // Load factor score: passengers per tonne of take-off fuel.
+  // A higher ratio means more passengers are carried for each tonne of fuel
+  // burned — i.e. the flight is commercially efficient.  A lower ratio means
+  // the aircraft is carrying little payload relative to its fuel load.
+  // Only entries with both PAX and TOF available participate.
+  const withScore = entries.filter(e => e.ls.pax > 0 && e.ls.tof > 0);
+  function loadScore(e) { return e.ls.pax / (e.ls.tof / 1000); }
+  function fmtScore(e)  { return loadScore(e).toFixed(1) + '\u202fpax/t'; }
+
+  const maxPAX    = dedupeByLabel([...withPAX].sort((a, b) => b.ls.pax - a.ls.pax)).slice(0, LS_TOP_N);
+  const minPAX    = dedupeByLabel([...withPAX].sort((a, b) => a.ls.pax - b.ls.pax)).slice(0, LS_TOP_N);
+  const maxTOW    = dedupeByLabel([...withTOW].sort((a, b) => b.ls.tow - a.ls.tow)).slice(0, LS_TOP_N);
+  const maxTOF    = dedupeByLabel([...withTOF].sort((a, b) => b.ls.tof - a.ls.tof)).slice(0, LS_TOP_N);
+  // Best load factor: highest PAX-per-tonne-of-fuel score.
+  const goodFlights = dedupeByLabel([...withScore].sort((a, b) => loadScore(b) - loadScore(a))).slice(0, LS_TOP_N);
+  // Worst load factor: lowest PAX-per-tonne-of-fuel score.
+  // Entries that already appear in goodFlights are excluded so that a single
+  // flight cannot show up in both columns simultaneously.
+  const _goodSet = new Set(goodFlights);
+  const badFlights = dedupeByLabel(
+    [...withScore]
+      .sort((a, b) => loadScore(a) - loadScore(b))
+      .filter(e => !_goodSet.has(e))
+  ).slice(0, LS_TOP_N);
+
+  overlay.innerHTML =
+    lsCol('Max PAX', maxPAX, e => String(e.ls.pax)) +
+    lsCol('Min PAX', minPAX, e => String(e.ls.pax)) +
+    lsCol('Max TOW', maxTOW, e => fmtTonnes(e.ls.tow)) +
+    lsCol('Max TOF', maxTOF, e => fmtTonnes(e.ls.tof)) +
+    lsCol('<span style="color:#4ade80">\u2714 GOOD load factor</span>', goodFlights, fmtScore) +
+    lsCol('<span style="color:#f87171">\u2716 BAD load factor</span>',  badFlights,  fmtScore);
+
+  overlay.style.display = 'flex';
+}
+
+// =============================================================================
+// buildPWIStatsControl creates a Leaflet control (positioned at bottom-right) showing
+// five columns of route wind statistics collected from all PWI waypoints on the map:
+//   1. Coldest temperature   (per waypoint — min across all flight levels)
+//   2. Warmest temperature   (per waypoint — max across all flight levels)
+//   3. Fastest wind          (per waypoint — max across all flight levels, in km/h)
+//   4. Coldest flight level  (per FL — the FL with the overall minimum temperature)
+//   5. Windiest flight level (per FL — the FL with the overall maximum wind speed)
+// Rows in columns 1-3 are clickable and fly the map to the waypoint's location.
+// Returns null when no route wind data is available.
+function buildPWIStatsControl(waypointEntries, flEntries) {
+  const withTemp = waypointEntries.filter(p => p.minTemp !== null || p.maxTemp !== null);
+  const withWind = waypointEntries.filter(p => p.maxWind !== null || p.minWind !== null);
+  if (!withTemp.length && !withWind.length) return null;
+
+  const TOP_N = 6;
+  const coldest  = [...withTemp].filter(p => p.minTemp !== null)
+    .sort((a, b) => a.minTemp - b.minTemp).slice(0, TOP_N);
+  const warmest  = [...withTemp].filter(p => p.maxTemp !== null)
+    .sort((a, b) => b.maxTemp - a.maxTemp).slice(0, TOP_N);
+  const fastest  = [...withWind].filter(p => p.maxWind !== null)
+    .sort((a, b) => b.maxWind - a.maxWind).slice(0, TOP_N);
+  const coldestFL  = [...flEntries].filter(f => f.minTemp !== null)
+    .sort((a, b) => a.minTemp - b.minTemp).slice(0, TOP_N);
+  const windiestFL = [...flEntries].filter(f => f.maxWind !== null)
+    .sort((a, b) => b.maxWind - a.maxWind).slice(0, TOP_N);
+
+  if (!coldest.length && !fastest.length) return null;
+
+  function fmtTemp(v) {
+    const r = Math.round(v);
+    return (r >= 0 ? '+' : '') + r + '\u00b0C';
+  }
+  // Wind speed stored in knots — display in km/h for consistency with the rest of the UI.
+  function fmtWindKts(kts) {
+    return Math.round(kts * 1.852) + '\u202fkm/h';
+  }
+  function fmtFL(fl) {
+    return 'FL\u202f' + Math.round(fl);
+  }
+
+  // colPoints maps column index (0-3) to the sorted waypoint entry array so
+  // the click handler can resolve the correct entry via [colIdx][rowIdx].
+  const colPoints = [coldest, warmest, fastest];
+
+  // Renders a column whose rows each represent a waypoint (clickable, flies to point).
+  function wpColHtml(title, rows, valueFn, colIdx) {
+    if (!rows.length) return '';
+    let html = `<div class="pwi-stat-col"><div class="meteo-stat-heading">${title}</div>`;
+    for (let i = 0; i < rows.length; i++) {
+      const p = rows[i];
+      html += `<div class="meteo-stat-row" data-pwicol="${colIdx}" data-pwirow="${i}" title="${escapeHtml(p.name || '?')}">` +
+              `<span class="meteo-stat-val">${valueFn(p)}</span>` +
+              `<span class="meteo-stat-tail">${escapeHtml(p.name || '?')}</span>` +
+              '</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  // Renders a column whose rows each represent a flight level (not clickable).
+  function flColHtml(title, rows, valueFn) {
+    if (!rows.length) return '';
+    let html = `<div class="pwi-stat-col"><div class="meteo-stat-heading">${title}</div>`;
+    for (const f of rows) {
+      html += `<div class="meteo-stat-row">` +
+              `<span class="meteo-stat-val">${valueFn(f)}</span>` +
+              `<span class="meteo-stat-tail">${fmtFL(f.fl)}</span>` +
+              '</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  const ctrl = L.control({ position: 'bottomright' });
+  ctrl.onAdd = function() {
+    const div = L.DomUtil.create('div', 'pwi-stats-panel');
+    div.innerHTML =
+      wpColHtml('Najhladnije',          coldest,  p => fmtTemp(p.minTemp),      0) +
+      wpColHtml('Najtoplije',           warmest,  p => fmtTemp(p.maxTemp),      1) +
+      wpColHtml('Najja\u010di vetar',  fastest,  p => fmtWindKts(p.maxWind),  2) +
+      flColHtml('Najhladniji FL',       coldestFL,  f => fmtTemp(f.minTemp))   +
+      flColHtml('Najvjetrovitiji FL',   windiestFL, f => fmtWindKts(f.maxWind));
+    L.DomEvent.disableScrollPropagation(div);
+    L.DomEvent.disableClickPropagation(div);
+    div.addEventListener('click', function(e) {
+      const row = e.target.closest('[data-pwicol]');
+      if (!row) return;
+      try {
+        const colIdx = parseInt(row.dataset.pwicol, 10);
+        const rowIdx = parseInt(row.dataset.pwirow, 10);
+        const p = colPoints[colIdx]?.[rowIdx];
+        if (!p || !p.latlng) return;
+        const popupMarker = colIdx === 0
+          ? (p.markerForMinTemp || p.marker)
+          : colIdx === 1
+            ? (p.markerForMaxTemp || p.marker)
+            : colIdx === 2
+              ? (p.markerForMaxWind || p.marker)
+              : p.marker;
+        map.flyTo(p.latlng, Math.max(map.getZoom(), 6), { animate: true, duration: 0.8 });
+        if (popupMarker) map.once('moveend', () => popupMarker.openPopup());
+      } catch (_) {}
+    });
+    return div;
+  };
+  return ctrl;
+}
+
+function rowHasParsedRoute(r) {
+  const results = Array.isArray(r?.raw?.results) ? r.raw.results : [];
+  for (const result of results) {
+    if (typeof result !== 'object' || !result) continue;
+
+    // Flat route string — present in most non-CPDLC parsers.
+    if (typeof result.route === 'string' && result.route.trim()) return true;
+
+    // MIAM REP/RTR: origin and destination extracted from the inner message.
+    if (typeof result.origin_icao === 'string' && result.origin_icao.trim()) return true;
+
+    // Waypoint array — H1, label10.
+    if (Array.isArray(result.waypoints) && result.waypoints.length > 0) return true;
+
+    // Route waypoints array — PDC.
+    if (Array.isArray(result.route_waypoints) && result.route_waypoints.length > 0) return true;
+
+    // CPDLC route clearance embedded in message elements.
+    const elements = Array.isArray(result.elements) ? result.elements : [];
+    for (const elem of elements) {
+      const data = elem?.data;
+      if (!data || typeof data !== 'object') continue;
+      // Shape 1: direct RouteClearance serialised as the element data.
+      if (Array.isArray(data.route_information) && data.route_information.length > 0) return true;
+      // Shape 2: combined position+route map — route_clearance is nested.
+      if (Array.isArray(data.route_clearance?.route_information) && data.route_clearance.route_information.length > 0) return true;
+    }
+  }
+  return false;
 }
 
 function extractRouteSyncOverride(obj){
@@ -1557,6 +2062,8 @@ function recomputeFilter(){
   const searchTextOnly = document.getElementById('searchTextOnly').checked;
   const onlyCoords = document.getElementById('onlyCoords').checked;
   const onlyFlight = document.getElementById('onlyFlight').checked;
+  const onlyRoute = document.getElementById('onlyRoute').checked;
+  const onlyMeteo = document.getElementById('onlyMeteo').checked;
 
   const idx = [];
   for (let i=0; i<rows.length; i++){
@@ -1564,6 +2071,8 @@ function recomputeFilter(){
     const flightDisplay = getFlightDisplayForRow(r);
     if (onlyCoords && !(isNum(r.lat) && isNum(r.lon))) continue;
     if (onlyFlight && !flightDisplay.trim()) continue;
+    if (onlyRoute && !rowHasParsedRoute(r)) continue;
+    if (onlyMeteo && !rowHasMeteo(r)) continue;
     if (lbl && r.label !== lbl) continue;
     if (typ && r.type !== typ) continue;
     if (q){
@@ -1601,6 +2110,7 @@ function recomputeFilterAndRender(){
   recomputeFilter();
   clampPage();
   renderPage();
+  updateLoadsheetStats();
 }
 
 function buildMessageSummaryText(row){
@@ -1774,9 +2284,15 @@ function makeDetailsCell(rowIndex){
 
 function getDisplayRawText(row, messageLabel, rawText){
   const raw = String(rawText || '').trimEnd();
-  if (messageLabel !== 'AA' && messageLabel !== 'SA' && messageLabel !== 'A6' && messageLabel !== 'B6') return raw;
+  if (messageLabel !== 'AA' && messageLabel !== 'BA' && messageLabel !== 'SA' && messageLabel !== 'A6' && messageLabel !== 'B6' && messageLabel !== 'MA') return raw;
 
   const results = Array.isArray(row?.raw?.results) ? row.raw.results : [];
+
+  if (messageLabel === 'MA') {
+    const miam = results.find((it) => it && (it.message_type === 'miam_ack' || it.message_type === 'miam_data' || it.message_type === 'miam_assembled'));
+    const expandedMIAM = formatMIAMRawText(raw, miam);
+    if (expandedMIAM) return expandedMIAM;
+  }
 
   if (messageLabel === 'SA') {
     const mediaadv = results.find((it) => it && it.message_type === 'media_advisory');
@@ -1810,6 +2326,24 @@ function getDisplayRawText(row, messageLabel, rawText){
   if (expandedADSC) return expandedADSC;
 
   return expanded || raw;
+}
+
+// formatMIAMRawText expands the raw text view for MIAM (label MA) messages.
+// The compressed payload (rawText) is shown first, followed by the decoded
+// MIAM block from the parsed result — consistent with the CPDLC/ADS-C pattern.
+function formatMIAMRawText(rawText, miam){
+  const raw = String(rawText || '').trimEnd();
+  if (!miam || typeof miam !== 'object') return raw;
+  if (miam.message_type === 'miam_assembled') {
+    const segs = miam.segment_count > 0 ? miam.segment_count : '?';
+    const full = String(miam.assembled_payload || '').trim();
+    const header = `[Reassembled MIAM payload – ${segs} segment${segs !== 1 ? 's' : ''}]`;
+    return full ? `${header}\n${full}` : raw;
+  }
+  const formatted = String(miam.formatted_text || '').trim();
+  if (!formatted) return raw;
+  if (!raw) return formatted;
+  return `${raw}\n\n${formatted}`;
 }
 
 function formatMediaAdvRawText(rawText, mediaadv){
@@ -1891,19 +2425,27 @@ function formatCPDLCRawText(rawText, cpdlc){
   if (Array.isArray(cpdlc.elements) && cpdlc.elements.length) {
     for (const element of cpdlc.elements) {
       const label = String(element?.label || '').trim() || '[element]';
-      elementLines.push(`   ${label}`);
+      const text = String(element?.text ?? element?.data?.text ?? '').trim();
 
-      const detailLines = formatCPDLCRawElementDetails(element);
-      if (detailLines.length) {
-        for (const line of detailLines) {
-          elementLines.push(`    ${line}`);
+      // When the Go parser has already resolved all [placeholder] substitutions,
+      // prefer the substituted text — it is more informative than the template
+      // label and avoids spurious detail-line rendering from unrelated data fields.
+      if (text && text !== label) {
+        // The element text may span multiple lines (e.g. a position report with
+        // one field per line).  Push each sub-line individually so the 3-space
+        // indent is preserved on every line, not just the first.
+        for (const subLine of text.split('\n')) {
+          elementLines.push(`   ${subLine}`);
         }
         continue;
       }
 
-      const text = String(element?.text ?? element?.data?.text ?? '').trim();
-      if (text && text !== label) {
-        elementLines.push(`    ${text}`);
+      // No substitution was possible; show the template label and attempt
+      // structured detail rendering (e.g., for position reports).
+      elementLines.push(`   ${label}`);
+      const detailLines = formatCPDLCRawElementDetails(element);
+      for (const line of detailLines) {
+        elementLines.push(`    ${line}`);
       }
     }
   } else if (typeof cpdlc.formatted_text === 'string' && cpdlc.formatted_text.trim()) {
@@ -1952,8 +2494,12 @@ function formatCPDLCRawElementDetails(element){
     }
   }
 
+  // The "unit" field is shared between ICAO unit-name elements (where it holds
+  // a facility designation string such as "EGTT") and DistanceOffset elements
+  // (where it holds a distance unit such as "nm" or "km").  Only render it as
+  // a facility name when the element label explicitly references [icaounitname].
   const unit = String(data.unit || '').trim();
-  if (unit) {
+  if (unit && label.includes('[icaounitname]')) {
     lines.push(`Facility Name: ${unit}`);
   }
 
@@ -3212,6 +3758,7 @@ function openMapRows(pts, titleText, openFirstPopup){
 
   if (!map){
     map = L.map('map', { zoomControl: true });
+    canvasRenderer = L.canvas({ padding: 0.5 });
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 18,
       attribution: '&copy; OpenStreetMap contributors'
@@ -3330,7 +3877,50 @@ function openMapRows(pts, titleText, openFirstPopup){
     return 0;
   }
 
+  // Maps tail callsign -> polyline/markers, used for click-to-highlight.
+  const polylineByTail = new Map(); // tail -> L.polyline
+  const markersByTail  = new Map(); // tail -> Array<{cm, baseRadius}>
+  let selectedTail = null;
+
+  // Highlight the track line and all markers for the given tail.
+  // Any previously selected tail is restored to its default style first.
+  function highlightTail(tail) {
+    if (selectedTail !== null && selectedTail !== tail) {
+      restoreTailHighlight(selectedTail);
+    }
+    selectedTail = tail;
+    const pl = polylineByTail.get(tail);
+    if (pl) {
+      pl.setStyle({ weight: 4, color: '#1d4ed8', opacity: 1.0 });
+    }
+    const entries = markersByTail.get(tail);
+    if (entries) {
+      for (const entry of entries) {
+        entry.cm.setRadius(entry.baseRadius + 2);
+      }
+    }
+  }
+
+  // Restore the track line and markers for the given tail to their default style.
+  function restoreTailHighlight(tail) {
+    const pl = polylineByTail.get(tail);
+    if (pl) {
+      pl.setStyle({ weight: 2, color: '#3388ff', opacity: 0.7 });
+    }
+    const entries = markersByTail.get(tail);
+    if (entries) {
+      for (const entry of entries) {
+        entry.cm.setRadius(entry.baseRadius);
+      }
+    }
+  }
+
+  // The direct-position track only contains actual observed positions (r.lat/r.lon),
+  // sorted chronologically.  Route waypoints are NOT mixed in here — mixing them
+  // across messages with different timestamps caused zigzag and loops.
   const trackByTail = new Map();
+  // Per-message route polylines: one entry per row that has ≥2 valid waypoints.
+  const routeLinesByRow = [];
   for (const r of pts){
     const tail = (r.tail || '').trim();
     if (!tail) continue;
@@ -3338,23 +3928,85 @@ function openMapRows(pts, titleText, openFirstPopup){
     const tms = tsToMs(r.timestamp);
     if (isNum(r.lat) && isNum(r.lon)){
       if (!trackByTail.has(tail)) trackByTail.set(tail, []);
-      trackByTail.get(tail).push({lat: r.lat, lon: r.lon, t: tms, seq: -1});
+      trackByTail.get(tail).push({lat: r.lat, lon: r.lon, t: tms});
     }
 
-    const pArr = getWaypointsFromRow(r);
-    for (let k=0; k<pArr.length; k++){
-      const p = pArr[k];
-      const lat = coerceNum(p && (p.latitude ?? p.lat));
-      const lon = coerceNum(p && (p.longitude ?? p.lon));
-      if (!(isNum(lat) && isNum(lon))) continue;
-      if (!trackByTail.has(tail)) trackByTail.set(tail, []);
-      trackByTail.get(tail).push({lat, lon, t: tms, seq: k});
+    // Collect route waypoints as a separate per-message polyline so that
+    // waypoints from different messages are never interleaved.
+    //
+    // PWI messages carry one WD section per flight level (WD390/WD370/...).
+    // Some waypoints appear only in certain FL sections — e.g. OGOLI only in
+    // WD370.  If all sections are collapsed into one aggregated list first
+    // (via getWaypointsFromRow), the FL-exclusive waypoints receive _order
+    // values higher than the last waypoint of the first FL section, causing
+    // the polyline to jump backwards after LIMES and scatter across the map.
+    //
+    // Fix: draw one dashed polyline per WD layer, each resolved independently
+    // so that the waypoint sequence stays in geographic order.  For all other
+    // message types (PDC, approach, etc.) the existing aggregated approach
+    // is correct and is used as the fallback.
+    const _rawRouteWinds = (() => {
+      const _layers = [];
+      if (Array.isArray(r.raw?.route_winds)) _layers.push(...r.raw.route_winds);
+      if (Array.isArray(r.raw?.results)) {
+        for (const _res of r.raw.results) {
+          if (Array.isArray(_res?.route_winds)) _layers.push(..._res.route_winds);
+        }
+      }
+      return _layers;
+    })();
+
+    if (_rawRouteWinds.length > 0) {
+      // PWI route: one polyline per WD flight-level layer.
+      for (const _layer of _rawRouteWinds) {
+        if (!Array.isArray(_layer?.waypoints) || _layer.waypoints.length < 2) continue;
+        // Build a minimal points list for this FL only, then resolve
+        // coordinates using the same context-aware lookup as the normal path.
+        const _rawPoints = _layer.waypoints.map(wp => {
+          const _p = { name: wp.waypoint || '' };
+          const _lat = coerceNum(wp.latitude);
+          const _lon = coerceNum(wp.longitude);
+          // Only carry explicit coords for coordinate-format waypoints; named
+          // fixes (latitude === 0) are left for the database lookup.
+          if (isNum(_lat) && isNum(_lon) && (_lat !== 0 || _lon !== 0)) {
+            _p.latitude = _lat;
+            _p.longitude = _lon;
+          }
+          return _p;
+        });
+        const _resolved = resolveWaypointSequence(_rawPoints);
+        const _routeLatlngs = [];
+        for (const _rp of _resolved) {
+          const _lat = coerceNum(_rp.latitude ?? _rp.lat);
+          const _lon = coerceNum(_rp.longitude ?? _rp.lon);
+          if (isNum(_lat) && isNum(_lon)) _routeLatlngs.push([_lat, _lon]);
+        }
+        if (_routeLatlngs.length >= 2) {
+          routeLinesByRow.push({latlngs: _routeLatlngs, tail});
+        }
+      }
+    } else {
+      // Non-PWI route (PDC, approach waypoints, etc.): use the aggregated
+      // waypoints — no multi-FL issue applies here.
+      const pArr = getWaypointsFromRow(r);
+      if (pArr.length >= 2) {
+        const routeLatlngs = [];
+        for (const p of pArr) {
+          const lat = coerceNum(p && (p.latitude ?? p.lat));
+          const lon = coerceNum(p && (p.longitude ?? p.lon));
+          if (isNum(lat) && isNum(lon)) routeLatlngs.push([lat, lon]);
+        }
+        if (routeLatlngs.length >= 2) {
+          routeLinesByRow.push({latlngs: routeLatlngs, tail});
+        }
+      }
     }
   }
 
-  for (const [, arr] of trackByTail.entries()){
+  // Draw the actual-position track per tail (solid line).
+  for (const [tail, arr] of trackByTail.entries()){
     if (arr.length < 2) continue;
-    arr.sort((a,b) => (a.t - b.t) || (a.seq - b.seq));
+    arr.sort((a,b) => a.t - b.t);
 
     const latlngs = [];
     let prev = null;
@@ -3366,41 +4018,104 @@ function openMapRows(pts, titleText, openFirstPopup){
     }
     if (latlngs.length < 2) continue;
 
-    L.polyline(latlngs, {
+    const pl = L.polyline(latlngs, {
       pane: 'trackPane',
       interactive: false,
       bubblingMouseEvents: false,
       weight: 2,
+      color: '#3388ff',
       opacity: 0.7
     }).addTo(allLayer);
+    polylineByTail.set(tail, pl);
   }
 
+  // Draw per-message route waypoint lines (dashed, lighter weight).
+  // Each line connects the waypoints from a single ACARS message in order,
+  // preventing zigzag that would occur if waypoints from multiple messages
+  // were joined into one polyline.
+  for (const {latlngs, tail} of routeLinesByRow){
+    const routePl = L.polyline(latlngs, {
+      pane: 'trackPane',
+      interactive: false,
+      bubblingMouseEvents: false,
+      weight: 1.5,
+      color: '#3388ff',
+      opacity: 0.5,
+      dashArray: '6, 5'
+    }).addTo(allLayer);
+    // Only register as the tail's polyline if no solid position track exists,
+    // so that click-to-highlight targets the solid line where one is present.
+    if (!polylineByTail.has(tail)) polylineByTail.set(tail, routePl);
+  }
+
+  // Collect meteo data points for the stats panel.
+  const meteoPoints = [];
+
+  // Collect PWI route wind stats for the panel (per waypoint and per flight level).
+  const pwiWaypointStatMap = new Map(); // waypointKey -> stat entry
+  const pwiFlStatMap = new Map();       // flightLevel -> { temps[], winds[] }
+
   const allLatLngs = [];
+  // Above this many rows, per-point FL labels are suppressed: they overlap
+  // heavily and each divIcon marker adds a real DOM element (unlike canvas).
+  const showFLLabels = pts.length <= 150;
   for (const r of pts){
     const tailLabel = (r.tail || r.registration || '').trim();
+    // Tracks the circleMarker created for this row's direct position (if any),
+    // so it can be attached to the meteo entry for popup-on-click support.
+    let directMarker = null;
 
     if (isNum(r.lat) && isNum(r.lon)){
       const latlng = [r.lat, r.lon];
       allLatLngs.push(latlng);
-      const cm = L.circleMarker(latlng, getDirectMarkerStyle(r));
-      const hfdlPairs = buildHFDLPairs(r);
-      const h2Pairs = buildH2InitialPairs(r);
-      const hfdlContext = extractHFDLContext(r);
-      const popupTitle = hfdlPairs.length
-        ? `${String(extractFlightDisplay(r.raw || r) || r.tail || '').trim() || 'HFDL'} • ${String(hfdlContext?.result?.hfnpdu_type || r.type || '').trim() || 'data'} • ${String(r.label || 'HFDL').trim() || 'HFDL'}`
-        : `${r.tail || ''} • ${r.type || ''} • ${r.label || ''}`;
-      const popupHtml =
-        `<div style="max-width:560px">
+      // Canvas renderer keeps all circleMarkers on one canvas element.
+      const cm = L.circleMarker(latlng, { ...getDirectMarkerStyle(r), renderer: canvasRenderer });
+      // Register this marker for track highlighting by tail callsign.
+      const _directTail = (r.tail || '').trim();
+      if (_directTail) {
+        if (!markersByTail.has(_directTail)) markersByTail.set(_directTail, []);
+        markersByTail.get(_directTail).push({ cm, baseRadius: cm.options.radius });
+        cm.on('popupopen',  function() { highlightTail(_directTail); });
+        cm.on('popupclose', function() { restoreTailHighlight(_directTail); });
+      }
+      // Popup content is built lazily — only when the user opens the popup —
+      // so the expensive renderDetailsObject call is not paid on initial render.
+      cm.bindPopup(function() {
+        const hfdlPairs = buildHFDLPairs(r);
+        const h2Pairs = buildH2InitialPairs(r);
+        const hfdlContext = extractHFDLContext(r);
+        const popupTitle = hfdlPairs.length
+          ? `${String(extractFlightDisplay(r.raw || r) || r.tail || '').trim() || 'HFDL'} \u2022 ${String(hfdlContext?.result?.hfnpdu_type || r.type || '').trim() || 'data'} \u2022 ${String(r.label || 'HFDL').trim() || 'HFDL'}`
+          : `${r.tail || ''} \u2022 ${r.type || ''} \u2022 ${r.label || ''}`;
+        return `<div style="max-width:560px">
           <div class="nowrap"><b>${escapeHtml(popupTitle)}</b></div>
-          <div class="kvmini" style="margin:4px 0 8px 0">${escapeHtml(formatTimestamp(r.timestamp))} • ${escapeHtml(coordStr(r.lat, r.lon))}</div>
+          <div class="kvmini" style="margin:4px 0 8px 0">${escapeHtml(formatTimestamp(r.timestamp))} \u2022 ${escapeHtml(coordStr(r.lat, r.lon))}</div>
           ${hfdlPairs.length ? renderKeyValuePairs(hfdlPairs) : h2Pairs.length ? renderKeyValuePairs(h2Pairs) : renderDetailsObject(r.raw)}
          </div>`;
-      cm.bindPopup(popupHtml, {maxWidth: 9999, maxHeight: 9999, className: 'big-popup'});
+      }, {maxWidth: 9999, maxHeight: 9999, className: 'big-popup'});
       cm.addTo(allLayer);
       if (!firstPopupMarker) firstPopupMarker = cm;
+      directMarker = cm;
 
       addTailLabel(latlng, tailLabel, getFlightLevelTextForRow(r));
-      addFLLabel(latlng, getFlightLevelTextForRow(r));
+      if (showFLLabels) addFLLabel(latlng, getFlightLevelTextForRow(r));
+    }
+
+    // Collect meteorological data for the stats panel regardless of whether
+    // this row has direct coordinates. Use the direct position if available,
+    // otherwise find the first valid position anywhere in the raw data.
+    {
+      const meteoLatlng = (isNum(r.lat) && isNum(r.lon))
+        ? [r.lat, r.lon]
+        : (() => { const c = extractCoords(r.raw); return c ? [c.lat, c.lon] : null; })();
+      if (meteoLatlng) {
+        const meteoEntry = extractMeteoFromRow(r, meteoLatlng);
+        if (meteoEntry) {
+          // Attach the circleMarker so the stats panel can open its popup.
+          meteoEntry.marker = directMarker;
+          meteoPoints.push(meteoEntry);
+        }
+      }
     }
 
     const wpts = getWaypointsFromRow(r);
@@ -3413,22 +4128,112 @@ function openMapRows(pts, titleText, openFirstPopup){
       const latlng = [lat, lon];
       allLatLngs.push(latlng);
   const waypointExtremeState = getWaypointExtremeState(p, waypointExtremes);
-  const cm = L.circleMarker(latlng, getWaypointMarkerStyle(p, waypointExtremes));
+  const cm = L.circleMarker(latlng, { ...getWaypointMarkerStyle(p, waypointExtremes), renderer: canvasRenderer });
+      // Register this waypoint marker for track highlighting by tail callsign.
+      const _wptTail = (r.tail || '').trim();
+      if (_wptTail) {
+        if (!markersByTail.has(_wptTail)) markersByTail.set(_wptTail, []);
+        markersByTail.get(_wptTail).push({ cm, baseRadius: cm.options.radius });
+        cm.on('popupopen',  function() { highlightTail(_wptTail); });
+        cm.on('popupclose', function() { restoreTailHighlight(_wptTail); });
+      }
 
       addTailLabel(latlng, tailLabel, getFlightLevelTextForRow(r));
-      addFLLabel(latlng, getFlightLevelTextForPoint(p, r));
+      // FL labels are intentionally omitted for route/PWI waypoints: they
+      // clutter the map when a route has many points, and the FL is already
+      // visible in the waypoint popup.
 
-      const pointName = String(p?.name || p?.waypoint || `waypoint #${k+1}`).trim();
-      const popupHtml =
-        `<div style="max-width:560px">
-          <div class="nowrap"><b>${escapeHtml(r.tail || '')}</b> • ${escapeHtml(pointName)} • ${escapeHtml(r.label || '')}</div>
-          <div class="kvmini" style="margin:4px 0 8px 0">${escapeHtml(formatTimestamp(r.timestamp))} • ${escapeHtml(coordStr(lat, lon))}</div>
+      cm.bindPopup(function() {
+        const pointName = String(p?.name || p?.waypoint || `waypoint #${k+1}`).trim();
+        return `<div style="max-width:560px">
+          <div class="nowrap"><b>${escapeHtml(r.tail || '')}</b> \u2022 ${escapeHtml(pointName)} \u2022 ${escapeHtml(r.label || '')}</div>
+          <div class="kvmini" style="margin:4px 0 8px 0">${escapeHtml(formatTimestamp(r.timestamp))} \u2022 ${escapeHtml(coordStr(lat, lon))}</div>
           ${formatWaypointPopupDetails(p, waypointExtremeState, r)}
          </div>`;
-      cm.bindPopup(popupHtml, {maxWidth: 9999, maxHeight: 9999, className: 'big-popup'});
+      }, {maxWidth: 9999, maxHeight: 9999, className: 'big-popup'});
       cm.addTo(allLayer);
       if (!firstPopupMarker) firstPopupMarker = cm;
+
+      // Collect route wind data for the PWI statistics panel.
+      if (String(p?.segment || '').trim() === 'route_wind') {
+        const wpKey = getWaypointAggregateKey(p);
+        if (wpKey) {
+          if (!pwiWaypointStatMap.has(wpKey)) {
+            pwiWaypointStatMap.set(wpKey, {
+              name: String(p?.name || p?.waypoint || '').trim(),
+              latlng,
+              minTemp: null, maxTemp: null,
+              maxWind: null, minWind: null,
+              marker: cm,
+              markerForMinTemp: null,
+              markerForMaxTemp: null,
+              markerForMaxWind: null
+            });
+          }
+          const pwiEntry = pwiWaypointStatMap.get(wpKey);
+          // Always keep the reference to the most recently added circleMarker.
+          // Leaflet stacks markers in insertion order, so the last one sits on
+          // top and receives mouse clicks — this ensures the panel click opens
+          // the same popup the user would get by clicking the point on the map.
+          pwiEntry.marker = cm;
+          // Each aggregated point may carry a layers[] array (one entry per FL).
+          const layers = Array.isArray(p?.layers) ? p.layers : [p];
+          for (const layer of layers) {
+            const lTemp = coerceNum(layer?.temperature);
+            const lWind = coerceNum(layer?.wind_speed);
+            const lFL   = coerceNum(layer?.flight_level);
+            if (Number.isFinite(lTemp)) {
+              if (pwiEntry.minTemp === null || lTemp < pwiEntry.minTemp) {
+                pwiEntry.minTemp = lTemp;
+                pwiEntry.markerForMinTemp = cm;
+              }
+              if (pwiEntry.maxTemp === null || lTemp > pwiEntry.maxTemp) {
+                pwiEntry.maxTemp = lTemp;
+                pwiEntry.markerForMaxTemp = cm;
+              }
+            }
+            if (Number.isFinite(lWind)) {
+              if (pwiEntry.maxWind === null || lWind > pwiEntry.maxWind) {
+                pwiEntry.maxWind = lWind;
+                pwiEntry.markerForMaxWind = cm;
+              }
+              if (pwiEntry.minWind === null || lWind < pwiEntry.minWind) pwiEntry.minWind = lWind;
+            }
+            if (Number.isFinite(lFL) && lFL > 0) {
+              if (!pwiFlStatMap.has(lFL)) pwiFlStatMap.set(lFL, { temps: [], winds: [] });
+              if (Number.isFinite(lTemp)) pwiFlStatMap.get(lFL).temps.push(lTemp);
+              if (Number.isFinite(lWind)) pwiFlStatMap.get(lFL).winds.push(lWind);
+            }
+          }
+        }
+      }
     }
+  }
+
+  // Replace the stats control so it always reflects the current data set.
+  if (meteoStatsControl) {
+    map.removeControl(meteoStatsControl);
+    meteoStatsControl = null;
+  }
+  console.log('[meteo-stats] points collected:', meteoPoints.length,
+    meteoPoints.map(p => ({ tail: p.tail, oat: p.oat, wind: p.windSpeedKmh })));
+  const _statsCtrl = buildMeteoStatsControl(meteoPoints);
+  if (_statsCtrl) meteoStatsControl = _statsCtrl.addTo(map);
+
+  // Build and display the PWI route wind statistics panel.
+  if (pwiStatsControl) {
+    map.removeControl(pwiStatsControl);
+    pwiStatsControl = null;
+  }
+  if (pwiWaypointStatMap.size > 0) {
+    const pwiWpEntries = [...pwiWaypointStatMap.values()];
+    const pwiFlEntries = [...pwiFlStatMap.entries()].map(([fl, data]) => ({
+      fl,
+      minTemp: data.temps.length ? Math.min(...data.temps) : null,
+      maxWind: data.winds.length ? Math.max(...data.winds) : null,
+    }));
+    const _pwiCtrl = buildPWIStatsControl(pwiWpEntries, pwiFlEntries);
+    if (_pwiCtrl) pwiStatsControl = _pwiCtrl.addTo(map);
   }
 
   if (allLatLngs.length > 1){
@@ -3966,7 +4771,7 @@ document.getElementById('airportsFile').addEventListener('change', async (ev) =>
   }
 });
 
-for (const id of ['q','searchTextOnly','label','type','onlyCoords','onlyFlight','pageSize']){
+for (const id of ['q','searchTextOnly','label','type','onlyCoords','onlyFlight','onlyRoute','onlyMeteo','pageSize']){
   document.getElementById(id).addEventListener('input', () => { page = 0; recomputeFilterAndRender(); });
   document.getElementById(id).addEventListener('change', () => { page = 0; recomputeFilterAndRender(); });
 }
@@ -3978,6 +4783,8 @@ document.getElementById('reset').addEventListener('click', () => {
   document.getElementById('type').value = '';
   document.getElementById('onlyCoords').checked = false;
   document.getElementById('onlyFlight').checked = false;
+  document.getElementById('onlyRoute').checked = false;
+  document.getElementById('onlyMeteo').checked = false;
   document.getElementById('pageSize').value = '100';
   page = 0;
   recomputeFilterAndRender();
@@ -4017,5 +4824,7 @@ tryLoadDefaultAirportLookup();
 refreshRouteAPIConfig();
 
 </script>
+<!-- Loadsheet statistics overlay: rendered by updateLoadsheetStats() -->
+<div id="lsStatsOverlay" class="loadsheet-stats-panel" style="display:none"></div>
 </body>
 </html>

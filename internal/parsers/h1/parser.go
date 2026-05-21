@@ -699,6 +699,10 @@ func (p *PWIParser) Parse(msg *acars.Message) registry.Result {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(text, "\n", "")
 
+	// Strip the trailing 4-character hex message hash (ARINC 618 BCC) before
+	// any field parsing so that individual field parsers never see the hash.
+	text = stripACARSHash(text)
+
 	// Split by section markers (TS, CB, WD, DD).
 	sections := strings.Split(text, "/")
 	for _, section := range sections {
@@ -865,35 +869,96 @@ func looksLikeCoordinateWaypoint(value string) bool {
 	return true
 }
 
+// stripACARSHash removes the trailing 4-character CRC hash (ARINC 618 BCC)
+// from s if the last 4 characters are all valid hexadecimal digits.  The hash
+// is always exactly 4 characters and is appended without a separator by the
+// ACARS ground station; stripping it once at the message level prevents hash
+// characters from contaminating any downstream field parser.
+func stripACARSHash(s string) string {
+	if len(s) < 4 {
+		return s
+	}
+	tail := s[len(s)-4:]
+	for _, c := range tail {
+		if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f')) {
+			return s
+		}
+	}
+	return s[:len(s)-4]
+}
+
+// parsePWIWindData extracts wind direction and speed from a PWI wind field such
+// as "26514" (dir=265, speed=14) or "276137" (dir=276, speed=137).
+//
+// The field is 5 digits (3-digit direction + 2-digit speed) or 6 digits
+// (3-digit direction + 3-digit speed).  The ACARS message hash is stripped
+// before this function is called, so the field should contain only valid
+// numeric data.  As a defensive measure, only the leading run of decimal digits
+// is considered; any residual non-decimal characters terminate the scan.
 func parsePWIWindData(value string, waypoint *WaypointWind) {
 	value = strings.TrimSpace(value)
 	if len(value) < 5 {
 		return
 	}
-	if len(value) > 6 {
-		value = value[:6]
+
+	// Collect only leading decimal digit characters as a defensive measure.
+	end := 0
+	for end < len(value) && value[end] >= '0' && value[end] <= '9' {
+		end++
 	}
-	if len(value) == 5 {
-		_, _ = fmt.Sscanf(value[:3], "%d", &waypoint.WindDir)
-		_, _ = fmt.Sscanf(value[3:], "%d", &waypoint.WindSpeed)
+	digits := value[:end]
+
+	// The wind field is at most 6 digits (3 dir + 3 speed).
+	if len(digits) > 6 {
+		digits = digits[:6]
+	}
+	if len(digits) < 5 {
 		return
 	}
-	_, _ = fmt.Sscanf(value[:3], "%d", &waypoint.WindDir)
-	_, _ = fmt.Sscanf(value[3:6], "%d", &waypoint.WindSpeed)
+
+	var dir, speed int
+	_, _ = fmt.Sscanf(digits[:3], "%d", &dir)
+	_, _ = fmt.Sscanf(digits[3:], "%d", &speed)
+	waypoint.WindDir = dir
+	waypoint.WindSpeed = speed
 }
 
+// parsePWITemperature extracts the temperature from a PWI field such as "370M49" or "370P02".
+// The PWI format specifies exactly 2 digits for the temperature value; any trailing characters
+// (e.g. a 4-character message hash appended to the last entry in a section) are discarded.
 func parsePWITemperature(value string, waypoint *WaypointWind) {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return
 	}
+
+	// extractTempDigits returns at most 2 leading digit characters from s.
+	extractTempDigits := func(s string) string {
+		end := 0
+		for end < len(s) && s[end] >= '0' && s[end] <= '9' {
+			end++
+		}
+		if end > 2 {
+			end = 2
+		}
+		return s[:end]
+	}
+
 	if mIdx := strings.Index(value, "M"); mIdx >= 0 {
+		digits := extractTempDigits(value[mIdx+1:])
+		if digits == "" {
+			return
+		}
 		var temp int
-		_, _ = fmt.Sscanf(value[mIdx+1:], "%d", &temp)
+		_, _ = fmt.Sscanf(digits, "%d", &temp)
 		waypoint.Temperature = -temp
 		return
 	}
 	if pIdx := strings.Index(value, "P"); pIdx >= 0 {
-		_, _ = fmt.Sscanf(value[pIdx+1:], "%d", &waypoint.Temperature)
+		digits := extractTempDigits(value[pIdx+1:])
+		if digits == "" {
+			return
+		}
+		_, _ = fmt.Sscanf(digits, "%d", &waypoint.Temperature)
 	}
 }

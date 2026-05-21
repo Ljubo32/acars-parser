@@ -202,7 +202,18 @@ func isRouteCode(raw string) bool {
 }
 
 func parseThousandths(raw string, width int) (float64, bool) {
-	if len(raw) != width {
+	// Accept either:
+	//  - exactly `width` characters (unsigned, or a negative value whose sign
+	//    already fits within the slot — e.g. "-74170" in a 6-char longitude).
+	//  - exactly `width+1` characters where the first byte is a sign prefix;
+	//    this handles southern latitudes whose digit count equals `width` but
+	//    the sign pushes the total length to `width+1` (e.g. "-15319", width=5).
+	n := len(raw)
+	if n == width {
+		// Normal path; strconv.Atoi handles the sign when present.
+	} else if n == width+1 && (raw[0] == '-' || raw[0] == '+') {
+		// Signed value that needs one extra character for the sign prefix.
+	} else {
 		return 0, false
 	}
 	value, err := strconv.Atoi(raw)

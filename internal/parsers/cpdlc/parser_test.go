@@ -2,6 +2,7 @@ package cpdlc
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"math"
 	"strings"
 	"testing"
@@ -310,8 +311,8 @@ func TestParseAAUplinkRouteClearanceSequence(t *testing.T) {
 	if len(firstRoute.RouteInformation) != 1 || firstRoute.RouteInformation[0].Position == nil || firstRoute.RouteInformation[0].Position.Name != "KGI" {
 		t.Fatalf("unexpected first route information: %#v", firstRoute.RouteInformation)
 	}
-	if firstRoute.RouteInfoAdditional != "" {
-		t.Fatalf("unexpected first route info additional: %q", firstRoute.RouteInfoAdditional)
+	if len(firstRoute.RouteInfoAdditional) != 0 {
+		t.Fatalf("unexpected first route info additional: %#v", firstRoute.RouteInfoAdditional)
 	}
 	if r.Elements[1].ID != 19 {
 		t.Fatalf("Second element ID = %d, want 19", r.Elements[1].ID)
@@ -465,7 +466,8 @@ func TestParseUplinkContactWithFreeText(t *testing.T) {
 	if !ok || freeText == nil || freeText.Text != "LOGON FZZA" {
 		t.Fatalf("unexpected freetext: %#v", second.Data)
 	}
-	if r.FormattedText != "LOGON FZZA" {
+	wantText := "FANS-1/A CPDLC MESSAGE:\n CPDLC UPLINK MESSAGE:\n  HEADER:\n   MSG ID: 3\n   TIMESTAMP: 00:21:10\n  MESSAGE DATA:\n   AT AMPER CONTACT KINSHASA 126.100 MHz\n   LOGON FZZA"
+	if r.FormattedText != wantText {
 		t.Fatalf("unexpected formatted text: %q", r.FormattedText)
 	}
 }
@@ -535,7 +537,8 @@ func TestParseUplinkContactHFWithFreeTextRegression(t *testing.T) {
 	if !ok || freeText == nil || freeText.Text != "SECONDARY HF FREQUENCY 5634" {
 		t.Fatalf("unexpected freetext: %#v", second.Data)
 	}
-	if r.FormattedText != "SECONDARY HF FREQUENCY 5634" {
+	wantText := "FANS-1/A CPDLC MESSAGE:\n CPDLC UPLINK MESSAGE:\n  HEADER:\n   MSG ID: 5\n   TIMESTAMP: 01:47:37\n  MESSAGE DATA:\n   AT -35.0000,75.0000 CONTACT YMMM 13306 kHz\n   SECONDARY HF FREQUENCY 5634"
+	if r.FormattedText != wantText {
 		t.Fatalf("unexpected formatted text: %q", r.FormattedText)
 	}
 }
@@ -685,7 +688,8 @@ func TestParseUplinkSquawkBeaconCode(t *testing.T) {
 	if first.Text != "SQUAWK 0410" {
 		t.Fatalf("unexpected first text: %q", first.Text)
 	}
-	if r.FormattedText != "SQUAWK 0410" {
+	wantText := "FANS-1/A CPDLC MESSAGE:\n CPDLC UPLINK MESSAGE:\n  HEADER:\n   MSG ID: 3\n   TIMESTAMP: 00:37:01\n  MESSAGE DATA:\n   SQUAWK 0410"
+	if r.FormattedText != wantText {
 		t.Fatalf("unexpected formatted text: %q", r.FormattedText)
 	}
 }
@@ -746,7 +750,8 @@ func TestParseUplinkClimbToReachAltitudeByTime(t *testing.T) {
 	if first.Text != "CLIMB TO REACH FL360 BY 15:00" {
 		t.Fatalf("unexpected first text: %q", first.Text)
 	}
-	if r.FormattedText != "CLIMB TO REACH FL360 BY 15:00" {
+	wantText := "FANS-1/A CPDLC MESSAGE:\n CPDLC UPLINK MESSAGE:\n  HEADER:\n   MSG ID: 1\n  MESSAGE DATA:\n   CLIMB TO REACH FL360 BY 15:00"
+	if r.FormattedText != wantText {
 		t.Fatalf("unexpected formatted text: %q", r.FormattedText)
 	}
 }
@@ -801,7 +806,8 @@ func TestParseConnectRequestFacilityDesignationTP4Table(t *testing.T) {
 	if first.Text != "VABF labelA" {
 		t.Fatalf("unexpected first text: %q", first.Text)
 	}
-	if r.FormattedText != "VABF labelA" {
+	wantText := "FANS-1/A CPDLC MESSAGE:\n CPDLC UPLINK MESSAGE:\n  HEADER:\n   MSG ID: 0\n  MESSAGE DATA:\n   VABF labelA"
+	if r.FormattedText != wantText {
 		t.Fatalf("unexpected formatted text: %q", r.FormattedText)
 	}
 }
@@ -962,4 +968,209 @@ func TestParseUplinkRouteClearanceWithCoordinateRouteInformationRegression(t *te
 	if airwayCount != 1 {
 		t.Fatalf("airwayCount = %d, want 1; route=%#v", airwayCount, routeClearance.RouteInformation)
 	}
+}
+
+// TestParseBADownlinkAssignedRoute verifies that a label "BA" (downlink) ASSIGNED ROUTE
+// message decodes correctly and produces the expected hierarchical formatted text.
+// The input is a real-world ACARS capture; expected output matches the libacars format.
+func TestParseBADownlinkAssignedRoute(t *testing.T) {
+	parser := &Parser{}
+
+	msg := &acars.Message{
+		ID:        1,
+		Label:     "BA",
+		Text:      "/PIKCPYA.AT1.D-AIKQ20C6D44A13A972A34B542E94EAD665A10694390D1459D1439360524D81E9360A24D4328CA5265C19966F026CA0649CD5BB28232A4FA1429D6998A1B771516745AB3FD465C21C07",
+		Timestamp: "2026-01-01T17:45:00Z",
+	}
+
+	result := parser.Parse(msg)
+	if result == nil {
+		t.Fatal("Parse() returned nil")
+	}
+
+	r := result.(*Result)
+	if r.Error != "" {
+		t.Fatalf("unexpected parse error: %s", r.Error)
+	}
+	if r.Direction != "downlink" {
+		t.Fatalf("expected downlink, got %q", r.Direction)
+	}
+	if r.Registration != "D-AIKQ" {
+		t.Fatalf("expected registration D-AIKQ, got %q", r.Registration)
+	}
+	if r.Header == nil || r.Header.MsgID != 1 {
+		t.Fatalf("unexpected header: %+v", r.Header)
+	}
+	if r.Header.Timestamp == nil || r.Header.Timestamp.Hours != 17 || r.Header.Timestamp.Minutes != 45 {
+		t.Fatalf("unexpected header timestamp: %+v", r.Header.Timestamp)
+	}
+	if len(r.Elements) == 0 {
+		t.Fatal("expected at least one element")
+	}
+
+	// The first element must be an ASSIGNED ROUTE downlink (dM40).
+	first := r.Elements[0]
+	if first.ID != 40 {
+		t.Fatalf("expected element ID 40 (ASSIGNED ROUTE), got %d", first.ID)
+	}
+	rc, ok := first.Data.(*RouteClearance)
+	if !ok || rc == nil {
+		t.Fatalf("expected *RouteClearance data, got %T", first.Data)
+	}
+
+	// Verify the fixed fields that are well-established in this message.
+	if rc.AirportDestination != "KJFK" {
+		t.Fatalf("expected destination KJFK, got %q", rc.AirportDestination)
+	}
+	if rc.RunwayArrival == nil || rc.RunwayArrival.Direction != 22 {
+		t.Fatalf("unexpected arrival runway: %+v", rc.RunwayArrival)
+	}
+	if rc.RunwayArrival.Configuration != "left" {
+		t.Fatalf("expected left configuration, got %q", rc.RunwayArrival.Configuration)
+	}
+	if rc.ProcedureApproach == nil || rc.ProcedureApproach.Name != "RNVY" {
+		t.Fatalf("unexpected approach procedure: %+v", rc.ProcedureApproach)
+	}
+	if len(rc.RouteInformation) == 0 {
+		t.Fatal("expected route information")
+	}
+
+	// Log the raw JSON struct for debugging the procedure decode.
+	rawJSON, _ := json.MarshalIndent(rc, "", "  ")
+	t.Logf("RouteClearance JSON:\n%s", string(rawJSON))
+
+	// Verify the formatted text contains the expected hierarchical content.
+	if r.FormattedText == "" {
+		t.Fatal("FormattedText is empty")
+	}
+	mustContain := []string{
+		"FANS-1/A CPDLC MESSAGE:",
+		"CPDLC DOWNLINK MESSAGE:",
+		"MSG ID: 1",
+		"ASSIGNED ROUTE [ROUTECLEARANCE]",
+		"DESTINATION AIRPORT: KJFK",
+		"ARRIVAL RUNWAY:",
+		"RUNWAY DIRECTION: 22",
+		"RUNWAY CONFIGURATION: LEFT",
+		"APPROACH PROCEDURE:",
+		"PROCEDURE NAME: RNVY",
+		"ROUTE:",
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(r.FormattedText, s) {
+			t.Errorf("FormattedText missing %q\nGot:\n%s", s, r.FormattedText)
+		}
+	}
+
+	t.Logf("Formatted text:\n%s", r.FormattedText)
+}
+
+// TestParseBADownlinkAssignedRouteWithAdditionalConstraints verifies that a label "BA"
+// (downlink) ASSIGNED ROUTE message containing a FANSRouteInformationAdditional block
+// (the waypointSpeedAltitudeSequence optional field) decodes correctly.  The message
+// also carries a trailing dM80 element (DEVIATING ... OF ROUTE) to confirm that bit
+// consumption by the additional block does not corrupt subsequent elements.
+//
+// The input is a real-world capture: /PIKCPYA.AT1.G-TUIH ...
+func TestParseBADownlinkAssignedRouteWithAdditionalConstraints(t *testing.T) {
+	parser := &Parser{}
+
+	msg := &acars.Message{
+		ID:        2,
+		Label:     "BA",
+		Text:      "/PIKCPYA.AT1.G-TUIHAE0E910A3BB97366428B1E846215B324CCA6C998B0A95586C63852720CC9C829094EACE9F5024B8B4E4D809066CC8310642A5561C5B8239057E610F123599D169080C1E22499EC593120489124CF9EE1C90244874ABB26600038A000207200",
+		Timestamp: "2026-05-01T10:00:00Z",
+	}
+
+	result := parser.Parse(msg)
+	if result == nil {
+		t.Fatal("Parse() returned nil")
+	}
+
+	r := result.(*Result)
+	if r.Error != "" {
+		t.Fatalf("unexpected parse error: %s", r.Error)
+	}
+	if r.Direction != "downlink" {
+		t.Fatalf("expected downlink, got %q", r.Direction)
+	}
+	if r.Registration != "G-TUIH" {
+		t.Fatalf("expected registration G-TUIH, got %q", r.Registration)
+	}
+
+	// The message must decode to exactly two elements: dM40 then dM80.
+	if len(r.Elements) != 2 {
+		t.Fatalf("expected 2 elements, got %d", len(r.Elements))
+	}
+
+	// -- Element 0: dM40 ASSIGNED ROUTE with route-information-additional --
+
+	el0 := r.Elements[0]
+	if el0.ID != 40 {
+		t.Fatalf("expected element[0] ID 40 (ASSIGNED ROUTE), got %d", el0.ID)
+	}
+	rc, ok := el0.Data.(*RouteClearance)
+	if !ok || rc == nil {
+		t.Fatalf("expected *RouteClearance data for element[0], got %T", el0.Data)
+	}
+	if rc.AirportDeparture != "KMLB" {
+		t.Fatalf("expected departure KMLB, got %q", rc.AirportDeparture)
+	}
+	if rc.AirportDestination != "EGPF" {
+		t.Fatalf("expected destination EGPF, got %q", rc.AirportDestination)
+	}
+
+	// Verify that origin/destination are lifted to the top-level Result fields so
+	// that the state extractor and viewer can read them without navigating elements.
+	if r.Origin != "KMLB" {
+		t.Fatalf("expected Result.Origin KMLB, got %q", r.Origin)
+	}
+	if r.Destination != "EGPF" {
+		t.Fatalf("expected Result.Destination EGPF, got %q", r.Destination)
+	}
+
+	// The additional block must contain exactly 4 waypoint-speed-altitude entries.
+	if len(rc.RouteInfoAdditional) != 4 {
+		t.Fatalf("expected 4 RouteInfoAdditional entries, got %d", len(rc.RouteInfoAdditional))
+	}
+
+	// Spot-check each additional waypoint position name and altitude tolerance.
+	type expectedAdditional struct {
+		fixName   string
+		tolerance string
+	}
+	expectedAdditionals := []expectedAdditional{
+		{"FYNER", "at"},
+		{"IO121", "atorabove"},
+		{"IOO89", "atorabove"},
+		{"RW23", "at"},
+	}
+	for i, exp := range expectedAdditionals {
+		entry := rc.RouteInfoAdditional[i]
+		if entry.Position == nil {
+			t.Errorf("additional[%d]: Position is nil", i)
+			continue
+		}
+		if entry.Position.Name != exp.fixName {
+			t.Errorf("additional[%d]: expected fix %q, got %q", i, exp.fixName, entry.Position.Name)
+		}
+		if len(entry.Altitudes) == 0 {
+			t.Errorf("additional[%d]: no altitudes decoded", i)
+			continue
+		}
+		if entry.Altitudes[0].Tolerance != exp.tolerance {
+			t.Errorf("additional[%d]: expected tolerance %q, got %q", i, exp.tolerance, entry.Altitudes[0].Tolerance)
+		}
+	}
+
+	// -- Element 1: dM80 DEVIATING ... OF ROUTE --
+
+	el1 := r.Elements[1]
+	if el1.ID != 80 {
+		t.Fatalf("expected element[1] ID 80 (DEVIATING ... OF ROUTE), got %d", el1.ID)
+	}
+
+	rawJSON, _ := json.MarshalIndent(rc, "", "  ")
+	t.Logf("RouteClearance JSON:\n%s", string(rawJSON))
+	t.Logf("Formatted text:\n%s", r.FormattedText)
 }

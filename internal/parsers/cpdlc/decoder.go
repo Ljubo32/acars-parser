@@ -714,11 +714,13 @@ func (d *Decoder) decodeAltitudeAltitude() (map[string]interface{}, error) {
 	return map[string]interface{}{"altitude1": alt1, "altitude2": alt2}, nil
 }
 
-// decodePositionReport decodes dM48 POSITION REPORT data.
-// In the wild, the POS-CURRENT block is often preceded by a 20-bit presence bitmap.
-// Some aircraft omit the trailing "reported waypoint" triplet; we treat it as optional.
+// decodePositionReport decodes a dM48 POSITION REPORT element.
+//
+// The FANSPositionReport SEQUENCE has 22 fields: 3 mandatory (positioncurrent,
+// timeatpositioncurrent, altitude) and 19 optional. In UPER, the 19-bit presence
+// bitmap precedes the mandatory fields. If bitmap-based decoding fails, a fallback
+// without the bitmap is attempted (some implementations may omit it).
 func (d *Decoder) decodePositionReport() (*PositionReport, error) {
-	// Keep this tolerant: try the common 20-bit bitmap form first, then fall back.
 	start := d.br.Offset()
 
 	pr, err := d.decodePositionReportImpl(true)
@@ -732,234 +734,248 @@ func (d *Decoder) decodePositionReport() (*PositionReport, error) {
 		return pr2, nil
 	}
 
-	// Prefer the first error (bitmap form) because it's usually closer to what aircraft send.
+	// Return the bitmap-form error; it is usually the more informative one.
 	return nil, err
 }
 
+// decodePositionReportImpl decodes a FANSPositionReport.
+//
+// The 19 optional field bits map to (in declaration order):
+//
+//	0: fixnext                 3: timeetadestination  6:  winds
+//	1: timeetaatfixnext        4: remainingFuel       7:  turbulence
+//	2: fixnextplusone          5: temperature         8:  icing
+//	9: speed                   10: speedground        11: verticalChange
+//	12: trackAngle             13: trueHeading        14: distance
+//	15: supplementaryInformation
+//	16: reportedWaypointPosition
+//	17: reportedWaypointTime
+//	18: reportedWaypointAltitude
 func (d *Decoder) decodePositionReportImpl(withBitmap bool) (*PositionReport, error) {
 	pr := &PositionReport{}
 
+	// The presence bitmap has exactly 19 bits — one per optional field (fields 3-21).
+	var opt [19]bool
 	if withBitmap {
-		if _, err := d.br.ReadBits(20); err != nil {
-			return nil, fmt.Errorf("presence bitmap: %w", err)
+		for i := range opt {
+			b, err := d.br.ReadBit()
+			if err != nil {
+				return nil, fmt.Errorf("presence bitmap[%d]: %w", i, err)
+			}
+			opt[i] = b
 		}
 	}
 
-	// Current position (often encoded as latitude/longitude with minutes*10 precision).
-	pos, err := d.decodePositionReportPosCurrent()
+	// --- Mandatory fields ---
+
+	// positioncurrent: FANSPositionCurrent = FANSPosition, decoded via the standard position decoder.
+	pos, err := d.decodePosition()
 	if err != nil {
 		return nil, fmt.Errorf("pos_current: %w", err)
 	}
 	pr.PosCurrent = pos
 
-	// Time at current position: hours are commonly encoded 0..47 (6 bits) in FANS-1/A reports.
-	tCur, err := d.decodeTime48()
+	// timeatpositioncurrent: FANSTimeAtPositionCurrent — hours encoded 0..23 (5 bits), minutes 0..59.
+	tCur, err := d.decodeTime()
 	if err != nil {
 		return nil, fmt.Errorf("time_at_pos_current: %w", err)
 	}
 	pr.TimeAtPosCurrent = tCur
 
-	// Altitude.
+	// altitude.
 	alt, err := d.decodeAltitude()
 	if err != nil {
 		return nil, fmt.Errorf("alt: %w", err)
 	}
 	pr.Alt = alt
 
-	// Next fix.
-	nextFix, err := d.decodePosition()
-	if err != nil {
-		return nil, fmt.Errorf("next_fix: %w", err)
-	}
-	pr.NextFix = nextFix
+	// --- Optional fields (bitmap-gated when withBitmap=true) ---
 
-	// ETA at next fix (HH:MM).
-	etaNext, err := d.decodeTime()
-	if err != nil {
-		return nil, fmt.Errorf("eta_at_fix_next: %w", err)
-	}
-	pr.EtaAtFixNext = etaNext
-
-	// Next-next fix.
-	nextNextFix, err := d.decodePosition()
-	if err != nil {
-		return nil, fmt.Errorf("next_next_fix: %w", err)
-	}
-	pr.NextNextFix = nextNextFix
-
-	// ETA at destination (HH:MM).
-	etaDest, err := d.decodeTime()
-	if err != nil {
-		return nil, fmt.Errorf("eta_at_dest: %w", err)
-	}
-	pr.EtaAtDest = etaDest
-
-	// Temperature.
-	temp, err := d.decodeTemperature()
-	if err != nil {
-		return nil, fmt.Errorf("temp: %w", err)
-	}
-	pr.Temp = temp
-
-	// Winds.
-	winds, err := d.decodeWinds()
-	if err != nil {
-		return nil, fmt.Errorf("winds: %w", err)
-	}
-	pr.Winds = winds
-
-	// Speed.
-	spd, err := d.decodeSpeed()
-	if err != nil {
-		return nil, fmt.Errorf("speed: %w", err)
-	}
-	pr.Speed = spd
-
-	// Optional: reported waypoint (pos/time/alt).
-	// Some aircraft don't include it; if it doesn't fit, roll back and leave it empty.
-	off := d.br.Offset()
-	if d.br.Remaining() > 0 {
-		repPos, err1 := d.decodePosition()
-		repTime, err2 := d.decodeTime()
-		repAlt, err3 := d.decodeAltitude()
-		if err1 == nil && err2 == nil && err3 == nil {
-			pr.ReportedWptPos = repPos
-			pr.ReportedWptTime = repTime
-			pr.ReportedWptAlt = repAlt
-		} else {
-			_ = d.br.SetOffset(off)
+	// opt[0]: fixnext
+	if !withBitmap || opt[0] {
+		nextFix, err := d.decodePosition()
+		if err != nil {
+			return nil, fmt.Errorf("next_fix: %w", err)
 		}
+		pr.NextFix = nextFix
+	}
+
+	// opt[1]: timeetaatfixnext
+	if !withBitmap || opt[1] {
+		etaNext, err := d.decodeTime()
+		if err != nil {
+			return nil, fmt.Errorf("eta_at_fix_next: %w", err)
+		}
+		pr.EtaAtFixNext = etaNext
+	}
+
+	// opt[2]: fixnextplusone
+	if !withBitmap || opt[2] {
+		nextNextFix, err := d.decodePosition()
+		if err != nil {
+			return nil, fmt.Errorf("next_next_fix: %w", err)
+		}
+		pr.NextNextFix = nextNextFix
+	}
+
+	// opt[3]: timeetadestination
+	if !withBitmap || opt[3] {
+		etaDest, err := d.decodeTime()
+		if err != nil {
+			return nil, fmt.Errorf("eta_at_dest: %w", err)
+		}
+		pr.EtaAtDest = etaDest
+	}
+
+	// opt[4]: remainingFuel — not mapped to PositionReport; consume bits to stay aligned.
+	// TODO: add RemainingFuel field to PositionReport if needed.
+	if withBitmap && opt[4] {
+		if _, err := d.decodeTime(); err != nil {
+			return nil, fmt.Errorf("remaining_fuel: %w", err)
+		}
+	}
+
+	// opt[5]: temperature
+	if !withBitmap || opt[5] {
+		temp, err := d.decodeTemperature()
+		if err != nil {
+			return nil, fmt.Errorf("temp: %w", err)
+		}
+		pr.Temp = temp
+	}
+
+	// opt[6]: winds
+	if !withBitmap || opt[6] {
+		winds, err := d.decodeWinds()
+		if err != nil {
+			return nil, fmt.Errorf("winds: %w", err)
+		}
+		pr.Winds = winds
+	}
+
+	// opt[7]: turbulence — not mapped; consume bits to stay aligned.
+	// TODO: add Turbulence field to PositionReport if needed.
+	if withBitmap && opt[7] {
+		if _, err := d.br.ReadConstrainedInt(0, 3); err != nil {
+			return nil, fmt.Errorf("turbulence: %w", err)
+		}
+	}
+
+	// opt[8]: icing — not mapped; consume bits to stay aligned.
+	// TODO: add Icing field to PositionReport if needed.
+	if withBitmap && opt[8] {
+		if _, err := d.br.ReadConstrainedInt(0, 5); err != nil {
+			return nil, fmt.Errorf("icing: %w", err)
+		}
+	}
+
+	// opt[9]: speed
+	if !withBitmap || opt[9] {
+		spd, err := d.decodeSpeed()
+		if err != nil {
+			return nil, fmt.Errorf("speed: %w", err)
+		}
+		pr.Speed = spd
+	}
+
+	// opt[10]: speedground — FANSGroundSpeedKnots INTEGER(7..70), value × 10 = knots.
+	// This is a direct integer, NOT a FANSSpeed CHOICE like opt[9].
+	if withBitmap && opt[10] {
+		v, err := d.br.ReadConstrainedInt(7, 70)
+		if err != nil {
+			return nil, fmt.Errorf("speed_gnd: %w", err)
+		}
+		pr.SpeedGround = &Speed{Type: "knots", Value: v * 10}
+	}
+
+	// opt[11]: verticalChange — FANSVerticalChange SEQUENCE (direction + FANSVerticalRate).
+	if withBitmap && opt[11] {
+		vc, err := d.decodeVerticalChange()
+		if err != nil {
+			return nil, fmt.Errorf("vert_change: %w", err)
+		}
+		pr.VertChange = vc
+	}
+
+	// opt[12]: trackAngle — FANSDegrees (1-bit CHOICE magnetic/true + 9-bit value 1-360).
+	if withBitmap && opt[12] {
+		deg, err := d.decodeDegrees()
+		if err != nil {
+			return nil, fmt.Errorf("trk_angle: %w", err)
+		}
+		pr.TrackAngle = deg
+	}
+
+	// opt[13]: trueHeading — FANSDegrees (same encoding as trackAngle).
+	if withBitmap && opt[13] {
+		deg, err := d.decodeDegrees()
+		if err != nil {
+			return nil, fmt.Errorf("true_hdg: %w", err)
+		}
+		pr.TrueHeading = deg
+	}
+
+	// opt[14]: distance — FANSDistance; consume bits to maintain alignment.
+	// TODO: add a Distance field to PositionReport when messages containing this
+	// field are observed and the exact range values can be confirmed.
+	if withBitmap && opt[14] {
+		// FANSDistance CHOICE: 0=distanceNauticalMiles INTEGER(0..4095) (12 bits),
+		//                       1=distanceMetric       INTEGER(0..9999) (14 bits).
+		choice, err := d.br.ReadConstrainedInt(0, 1)
+		if err != nil {
+			return nil, fmt.Errorf("distance_choice: %w", err)
+		}
+		if choice == 0 {
+			if _, err := d.br.ReadConstrainedInt(0, 4095); err != nil {
+				return nil, fmt.Errorf("distance_nm: %w", err)
+			}
+		} else {
+			if _, err := d.br.ReadConstrainedInt(0, 9999); err != nil {
+				return nil, fmt.Errorf("distance_km: %w", err)
+			}
+		}
+	}
+
+	// opt[15]: supplementaryInformation — IA5String SIZE(1..256); consume bits to maintain alignment.
+	// TODO: add a SupplementaryInfo field to PositionReport when messages containing
+	// this field are observed.
+	if withBitmap && opt[15] {
+		if _, err := d.decodeFreeText(); err != nil {
+			return nil, fmt.Errorf("supplementary_info: %w", err)
+		}
+	}
+
+	// opt[16]: reportedWaypointPosition
+	if !withBitmap || opt[16] {
+		repPos, err := d.decodePosition()
+		if err != nil {
+			return nil, fmt.Errorf("reported_wpt_pos: %w", err)
+		}
+		pr.ReportedWptPos = repPos
+	}
+
+	// opt[17]: reportedWaypointTime
+	if !withBitmap || opt[17] {
+		repTime, err := d.decodeTime()
+		if err != nil {
+			return nil, fmt.Errorf("reported_wpt_time: %w", err)
+		}
+		pr.ReportedWptTime = repTime
+	}
+
+	// opt[18]: reportedWaypointAltitude
+	if !withBitmap || opt[18] {
+		repAlt, err := d.decodeAltitude()
+		if err != nil {
+			return nil, fmt.Errorf("reported_wpt_alt: %w", err)
+		}
+		pr.ReportedWptAlt = repAlt
 	}
 
 	return pr, nil
 }
 
-// decodePositionReportPosCurrent decodes the "pos_current" field inside dM48.
-// This position CHOICE differs from the generic FANS position used elsewhere:
-// aircraft commonly use a lat/lon encoding with minutes*10 precision.
-func (d *Decoder) decodePositionReportPosCurrent() (*Position, error) {
-	choice, err := d.br.ReadConstrainedInt(0, 7)
-	if err != nil {
-		return nil, err
-	}
 
-	pos := &Position{}
-
-	switch choice {
-	case 0: // Fix name.
-		name, err := d.decodeFixName()
-		if err != nil {
-			return nil, err
-		}
-		pos.Type = "fix"
-		pos.Name = name
-
-	case 1: // Navaid.
-		name, err := d.decodeNavaid()
-		if err != nil {
-			return nil, err
-		}
-		pos.Type = "navaid"
-		pos.Name = name
-
-	case 2: // Airport.
-		name, err := d.decodeAirport()
-		if err != nil {
-			return nil, err
-		}
-		pos.Type = "airport"
-		pos.Name = name
-
-	case 3, 7: // Latitude/Longitude (minutes*10).
-		lat, lon, err := d.decodeLatLonMin10()
-		if err != nil {
-			return nil, err
-		}
-		pos.Type = "latlon"
-		pos.Latitude = &lat
-		pos.Longitude = &lon
-
-	case 4: // Place/Bearing/Distance.
-		pbd, err := d.decodePlaceBearingDistance()
-		if err != nil {
-			return nil, err
-		}
-		pos.Type = "place_bearing_distance"
-		pos.Name = pbd.FixName
-		pos.Bearing = pbd.Bearing
-		pos.Distance = pbd.Distance
-		pos.DistanceUnit = pbd.DistanceUnit
-		if pbd.Latitude != nil && pbd.Longitude != nil {
-			pos.Latitude = pbd.Latitude
-			pos.Longitude = pbd.Longitude
-		}
-
-	default:
-		return nil, fmt.Errorf("unsupported pos_current choice %d", choice)
-	}
-
-	return pos, nil
-}
-
-// decodeLatLonMin10 decodes lat/lon as (deg, minutes*10) with hemisphere bits.
-// Observed layout (FANS-1/A position reports):
-//   - lat_deg: 0..90
-//   - lat_min10: 0..599 (minutes*10)
-//   - lat_dir: 0=north, 1=south
-//   - lon_dir: 0=west, 1=east
-//   - lon_deg: 0..180
-//   - lon_min10: 0..599 (minutes*10)
-func (d *Decoder) decodeLatLonMin10() (float64, float64, error) {
-	latDeg, err := d.br.ReadConstrainedInt(0, 90)
-	if err != nil {
-		return 0, 0, err
-	}
-	latMin10, err := d.br.ReadConstrainedInt(0, 599)
-	if err != nil {
-		return 0, 0, err
-	}
-	latSouth, err := d.br.ReadBit()
-	if err != nil {
-		return 0, 0, err
-	}
-
-	lonEast, err := d.br.ReadBit()
-	if err != nil {
-		return 0, 0, err
-	}
-	lonDeg, err := d.br.ReadConstrainedInt(0, 180)
-	if err != nil {
-		return 0, 0, err
-	}
-	lonMin10, err := d.br.ReadConstrainedInt(0, 599)
-	if err != nil {
-		return 0, 0, err
-	}
-
-	lat := float64(latDeg) + (float64(latMin10)/10.0)/60.0
-	lon := float64(lonDeg) + (float64(lonMin10)/10.0)/60.0
-	if latSouth {
-		lat = -lat
-	}
-	if !lonEast {
-		lon = -lon
-	}
-
-	return lat, lon, nil
-}
-
-// decodeTime48 decodes a time HH:MM where hours are encoded as 0..47.
-func (d *Decoder) decodeTime48() (*Time, error) {
-	hours, err := d.br.ReadConstrainedInt(0, 47)
-	if err != nil {
-		return nil, err
-	}
-	minutes, err := d.br.ReadConstrainedInt(0, 59)
-	if err != nil {
-		return nil, err
-	}
-	return &Time{Hours: hours, Minutes: minutes}, nil
-}
 
 func (d *Decoder) decodeTemperature() (*Temperature, error) {
 	// FANSTemperature is a CHOICE.
@@ -1739,6 +1755,32 @@ func (d *Decoder) decodeVerticalRate() (*VerticalRate, error) {
 	return vr, nil
 }
 
+// decodeVerticalChange decodes a FANSVerticalChange SEQUENCE.
+//
+// Structure: verticalDirection (1 bit: 0=up, 1=down) followed by a FANSVerticalRate
+// CHOICE (1 bit: 0=English, 1=Metric), encoded by the existing decodeVerticalRate helper.
+func (d *Decoder) decodeVerticalChange() (*VerticalChange, error) {
+	dir, err := d.br.ReadConstrainedInt(0, 1)
+	if err != nil {
+		return nil, err
+	}
+
+	vc := &VerticalChange{}
+	if dir == 0 {
+		vc.Direction = "up"
+	} else {
+		vc.Direction = "down"
+	}
+
+	rate, err := d.decodeVerticalRate()
+	if err != nil {
+		return nil, err
+	}
+	vc.Rate = rate
+
+	return vc, nil
+}
+
 func (d *Decoder) decodeFixName() (string, error) {
 	// 1-5 character fix name.
 	length, err := d.br.ReadConstrainedInt(1, 5)
@@ -2047,6 +2089,132 @@ func substituteFirst(text, pattern, replacement string) string {
 	return text
 }
 
+// decodeRouteInformationAdditional decodes a FANSRouteInformationAdditional structure.
+//
+// FANSRouteInformationAdditional is a SEQUENCE with one optional field:
+// wptSpeedAltSeq (SEQUENCE SIZE 1..4 OF FANSWaypointSpeedAltitude).
+//
+// Each FANSWaypointSpeedAltitude is a SEQUENCE with:
+//   - position (FANSPosition, mandatory)
+//   - speed     (FANSSpeed, optional)
+//   - altSeq    (SEQUENCE SIZE 1..4 OF FANSATWAltitude, optional)
+//
+// Each FANSATWAltitude is a SEQUENCE of:
+//   - atwAltTolerance (ENUMERATED at/atorabove/atorbelow, 2 bits)
+//   - altitude        (FANSAltitude)
+// decodeRouteInformationAdditional decodes a FANSRouteInformationAdditional structure.
+//
+// FANSRouteInformationAdditional is a SEQUENCE with 6 ALL OPTIONAL fields. In
+// UPER, the decoder reads a 6-bit presence bitmap, then decodes whichever
+// fields are flagged present. The 6 fields, in order, are:
+//
+//	0: aTWalongtrackwaypointsequence
+//	1: reportingPoints
+//	2: interceptCourseFromSequence
+//	3: holdAtWaypointSequence
+//	4: waypointSpeedAltitudeSequence   ← the one we decode
+//	5: rTArequiredtimearrivalsequenc
+//
+// Currently only the waypointSpeedAltitudeSequence field (index 4) is
+// implemented. If any of the other fields are present, an error is returned
+// because we cannot advance the bit reader past fields whose structures are not
+// yet implemented.
+func (d *Decoder) decodeRouteInformationAdditional() ([]WaypointSpeedAltitude, error) {
+	// Read the 6-bit presence bitmap.
+	var present [6]bool
+	for i := range present {
+		v, err := d.br.ReadBit()
+		if err != nil {
+			return nil, fmt.Errorf("routeInfoAdditional presence[%d]: %w", i, err)
+		}
+		present[i] = v
+	}
+
+	// Fields 0–3 and 5 are not implemented. If any are present we cannot safely
+	// advance past them, so return an error rather than produce corrupt output.
+	if present[0] || present[1] || present[2] || present[3] {
+		return nil, fmt.Errorf("unsupported FANSRouteInformationAdditional fields present (atw=%v reporting=%v intercept=%v hold=%v)", present[0], present[1], present[2], present[3])
+	}
+
+	if !present[4] {
+		// waypointSpeedAltitudeSequence not present; nothing to return.
+		// Field 5 (RTA) is also not implemented, but since we cannot advance
+		// past it we treat its presence as an error only when encountered with
+		// the waypoint sequence.
+		return nil, nil
+	}
+
+	// FANSWaypointSpeedAltitudesequence is SEQUENCE OF SIZE (1..32).
+	// bitsNeeded(31) = 5 bits.
+	count, err := d.br.ReadConstrainedInt(1, 32)
+	if err != nil {
+		return nil, fmt.Errorf("wptSpeedAltSeq count: %w", err)
+	}
+
+	entries := make([]WaypointSpeedAltitude, 0, count)
+	for i := 0; i < count; i++ {
+		// FANSWaypointSpeedAltitude is a SEQUENCE with:
+		//   position             (mandatory)
+		//   speed                (optional, presence bit 0)
+		//   aTWaltitudesequence  (optional, presence bit 1)
+		//
+		// UPER places the 2 presence bits before the mandatory field.
+		hasSpeed, err := d.br.ReadBit()
+		if err != nil {
+			return nil, fmt.Errorf("wptSpeedAlt[%d] hasSpeed: %w", i, err)
+		}
+		hasAltSeq, err := d.br.ReadBit()
+		if err != nil {
+			return nil, fmt.Errorf("wptSpeedAlt[%d] hasAltSeq: %w", i, err)
+		}
+
+		pos, err := d.decodePosition()
+		if err != nil {
+			return nil, fmt.Errorf("wptSpeedAlt[%d] position: %w", i, err)
+		}
+
+		wsa := WaypointSpeedAltitude{Position: pos}
+
+		if hasSpeed {
+			spd, err := d.decodeSpeed()
+			if err != nil {
+				return nil, fmt.Errorf("wptSpeedAlt[%d] speed: %w", i, err)
+			}
+			wsa.Speed = spd
+		}
+
+		if hasAltSeq {
+			// FANSATWAltitudeSequence is SEQUENCE OF SIZE (1..2).
+			// bitsNeeded(1) = 1 bit.
+			altCount, err := d.br.ReadConstrainedInt(1, 2)
+			if err != nil {
+				return nil, fmt.Errorf("wptSpeedAlt[%d] altSeq count: %w", i, err)
+			}
+			tolNames := []string{"at", "atorabove", "atorbelow"}
+			for j := 0; j < altCount; j++ {
+				// FANSATWAltitudeTolerance is ENUMERATED (0..2), 2 bits.
+				tol, err := d.br.ReadConstrainedInt(0, 2)
+				if err != nil {
+					return nil, fmt.Errorf("wptSpeedAlt[%d] atwAlt[%d] tolerance: %w", i, j, err)
+				}
+				tolName := "at"
+				if tol < len(tolNames) {
+					tolName = tolNames[tol]
+				}
+				alt, err := d.decodeAltitude()
+				if err != nil {
+					return nil, fmt.Errorf("wptSpeedAlt[%d] atwAlt[%d] altitude: %w", i, j, err)
+				}
+				wsa.Altitudes = append(wsa.Altitudes, ATWAltitude{Tolerance: tolName, Altitude: alt})
+			}
+		}
+
+		entries = append(entries, wsa)
+	}
+
+	return entries, nil
+}
+
 // decodeRouteClearance decodes a FANSRouteClearance structure.
 // FANSRouteClearance is a SEQUENCE with 10 ALL OPTIONAL fields.
 func (d *Decoder) decodeRouteClearance() (*RouteClearance, error) {
@@ -2172,66 +2340,14 @@ func (d *Decoder) decodeRouteClearance() (*RouteClearance, error) {
 	}
 
 	if hasRouteInfoAdditional {
-		off := d.br.Offset()
-
-		// Some aircraft encode an empty route-info-additional tail as a short
-		// zero-length field. Treat that as present-but-empty and stop here.
-		length, err := d.br.ReadConstrainedInt(0, 63)
-		if err == nil {
-			if length == 0 {
-				return rc, nil
-			}
-			text, textErr := d.decodeIA5String(length)
-			if textErr == nil && isLikelyRouteInfoAdditional(text) {
-				rc.RouteInfoAdditional = text
-				return rc, nil
-			}
-			_ = d.br.SetOffset(off)
-		}
-
-		// Fallback for longer IA5-string encodings seen in other samples.
-		length, err = d.br.ReadConstrainedInt(1, 256)
+		entries, err := d.decodeRouteInformationAdditional()
 		if err != nil {
-			_ = d.br.SetOffset(off)
-			return rc, nil
+			return nil, fmt.Errorf("routeInfoAdditional: %w", err)
 		}
-		text, err := d.decodeIA5String(length)
-		if err != nil {
-			_ = d.br.SetOffset(off)
-			return rc, nil
-		}
-		if !isLikelyRouteInfoAdditional(text) {
-			_ = d.br.SetOffset(off)
-			return rc, nil
-		}
-		rc.RouteInfoAdditional = text
+		rc.RouteInfoAdditional = entries
 	}
 
 	return rc, nil
-}
-
-func isLikelyRouteInfoAdditional(text string) bool {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return false
-	}
-	hasMeaningful := false
-	for _, ch := range text {
-		if ch < 32 || ch > 126 {
-			return false
-		}
-		isUpper := ch >= 'A' && ch <= 'Z'
-		isDigit := ch >= '0' && ch <= '9'
-		isSeparator := ch == ' ' || ch == '/' || ch == '-' || ch == '.' || ch == '+' || ch == '('
-		isSeparator = isSeparator || ch == ')' || ch == ','
-		if !isUpper && !isDigit && !isSeparator {
-			return false
-		}
-		if isUpper || isDigit {
-			hasMeaningful = true
-		}
-	}
-	return hasMeaningful
 }
 
 type routeInformationCandidate struct {
@@ -2393,7 +2509,17 @@ func (d *Decoder) decodeRunway() (*Runway, error) {
 // decodeProcedureName decodes a FANSProcedureName structure.
 // FANSProcedureName is a SEQUENCE of type (enum 0-2) and procedure (with optional transition).
 func (d *Decoder) decodeProcedureName() (*ProcedureName, error) {
-	// FANSProcedureType: 2 bits (0-2: arrival, approach, departure).
+	// FANSProcedureName is a SEQUENCE with one optional field (procedureTransition).
+	// In UPER, presence bits for optional fields come first, in declaration order.
+	// Declaration order: procedureType, procedure, procedureTransition (OPTIONAL).
+	// So the UPER bit layout is:
+	//   [1 bit: has_procedureTransition] [2 bits: procedureType] [variable: procedure] [if has_transition: procedureTransition]
+	hasTransition, err := d.br.ReadBit()
+	if err != nil {
+		return nil, fmt.Errorf("hasTransition: %w", err)
+	}
+
+	// FANSProcedureType: 2 bits (0=arrival, 1=approach, 2=departure).
 	procType, err := d.br.ReadConstrainedInt(0, 2)
 	if err != nil {
 		return nil, fmt.Errorf("procedureType: %w", err)
@@ -2403,12 +2529,6 @@ func (d *Decoder) decodeProcedureName() (*ProcedureName, error) {
 	typeName := "unknown"
 	if procType < len(typeNames) {
 		typeName = typeNames[procType]
-	}
-
-	// FANSProcedure has 1 optional field (transition).
-	hasTransition, err := d.br.ReadBit()
-	if err != nil {
-		return nil, fmt.Errorf("hasTransition: %w", err)
 	}
 
 	// Procedure identifier (SIZE 1..6).

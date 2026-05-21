@@ -71,6 +71,25 @@ func TestEB00Parse(t *testing.T) {
 			windSpeedKts:  20,
 			windSpeedKmh:  37,
 		},
+		{
+			// Southern-hemisphere latitude encodes a sign prefix, making the
+			// field 6 chars instead of the usual 5.  This was previously
+			// rejected by the strict length check in parseThousandths.
+			name:          "south_latitude",
+			text:          "EB0032AA_ N29989 FAORKEWR 63\n-15319 0068640004 34001-42626205001005Z007011",
+			registration:  "N29989",
+			msgNo:         63,
+			route:         "FAOR-KEWR",
+			lat:           -15.319,
+			lon:           6.864,
+			reportTime:    "00:04",
+			altitudeFt:    34001,
+			altitudeM:     10363,
+			temperatureC:  -42.6,
+			windDirection: 262,
+			windSpeedKts:  50,
+			windSpeedKmh:  92,
+		},
 	}
 
 	parser := &Parser{}

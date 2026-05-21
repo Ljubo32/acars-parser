@@ -2,6 +2,7 @@ package cpdlc
 
 import (
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -146,8 +147,66 @@ type RouteClearance struct {
 	ProcedureApproach   *ProcedureName            `json:"procedure_approach,omitempty"`
 	ProcedureArrival    *ProcedureName            `json:"procedure_arrival,omitempty"`
 	AirwayIntercept     string                    `json:"airway_intercept,omitempty"`
-	RouteInformation    []RouteInformationElement `json:"route_information,omitempty"`
-	RouteInfoAdditional string                    `json:"route_info_additional,omitempty"`
+	RouteInformation    []RouteInformationElement  `json:"route_information,omitempty"`
+	RouteInfoAdditional []WaypointSpeedAltitude    `json:"route_info_additional,omitempty"`
+}
+
+// ATWAltitude represents a single altitude constraint with a tolerance qualifier.
+// It corresponds to the FANSATWAltitude ASN.1 type in the FANS-1/A specification.
+type ATWAltitude struct {
+	Tolerance string    `json:"tolerance"` // "at", "atorabove", or "atorbelow".
+	Altitude  *Altitude `json:"altitude,omitempty"`
+}
+
+// WaypointSpeedAltitude represents a waypoint with optional speed and altitude
+// constraints. It corresponds to FANSWaypointSpeedAltitude in FANS-1/A.
+type WaypointSpeedAltitude struct {
+	Position  *Position     `json:"position,omitempty"`
+	Speed     *Speed        `json:"speed,omitempty"`
+	Altitudes []ATWAltitude `json:"altitudes,omitempty"`
+}
+
+func (w *WaypointSpeedAltitude) String() string {
+	if w == nil {
+		return ""
+	}
+	parts := []string{}
+	if w.Position != nil {
+		parts = append(parts, w.Position.String())
+	}
+	if w.Speed != nil {
+		parts = append(parts, w.Speed.String())
+	}
+	for _, a := range w.Altitudes {
+		if a.Altitude != nil {
+			parts = append(parts, a.Tolerance+" "+a.Altitude.String())
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// FormatHierarchical returns a multi-line hierarchical representation of the
+// waypoint speed/altitude entry.
+func (w *WaypointSpeedAltitude) FormatHierarchical(indent string) string {
+	if w == nil {
+		return ""
+	}
+	sub := indent + " "
+	var sb strings.Builder
+	if w.Position != nil {
+		sb.WriteString(indent + "POSITION: " + w.Position.String() + "\n")
+	}
+	if w.Speed != nil {
+		sb.WriteString(indent + "SPEED: " + w.Speed.String() + "\n")
+	}
+	for _, a := range w.Altitudes {
+		if a.Altitude != nil {
+			sb.WriteString(indent + "ALTITUDE CONSTRAINT:\n")
+			sb.WriteString(sub + "TOLERANCE: " + strings.ToUpper(a.Tolerance) + "\n")
+			sb.WriteString(sub + "ALTITUDE: " + a.Altitude.String() + "\n")
+		}
+	}
+	return sb.String()
 }
 
 type RouteInformationElement struct {
@@ -366,9 +425,9 @@ func (w *Winds) String() string {
 		return ""
 	}
 	if w.Speed != nil {
-		return fmt.Sprintf("%d°/%s", w.Direction, w.Speed.String())
+		return fmt.Sprintf("%d\u00b0/%s", w.Direction, w.Speed.String())
 	}
-	return fmt.Sprintf("%d°", w.Direction)
+	return fmt.Sprintf("%d\u00b0", w.Direction)
 }
 
 // PositionReport represents a downlink POSITION REPORT (dM48).
@@ -384,6 +443,10 @@ type PositionReport struct {
 	Temp             *Temperature `json:"temp,omitempty"`
 	Winds            *Winds       `json:"winds,omitempty"`
 	Speed            *Speed       `json:"speed,omitempty"`
+	SpeedGround      *Speed          `json:"speed_gnd,omitempty"`
+	VertChange       *VerticalChange `json:"vert_change,omitempty"`
+	TrackAngle       *Degrees        `json:"trk_angle,omitempty"`
+	TrueHeading      *Degrees        `json:"true_hdg,omitempty"`
 	ReportedWptPos   *Position    `json:"reported_wpt_pos,omitempty"`
 	ReportedWptTime  *Time        `json:"reported_wpt_time,omitempty"`
 	ReportedWptAlt   *Altitude    `json:"reported_wpt_alt,omitempty"`
@@ -415,10 +478,162 @@ func (p *PositionReport) String() string {
 	if p.Speed != nil {
 		parts = append(parts, "spd "+p.Speed.String())
 	}
+	if p.Temp != nil {
+		parts = append(parts, "temp "+p.Temp.String())
+	}
 	if len(parts) == 0 {
 		return "(position report)"
 	}
-	return fmt.Sprintf("%s", joinNonEmpty(parts, "; "))
+	// Use newline as the field separator so callers (e.g. the viewer raw text
+	// panel) can display each field on its own line without further parsing.
+	return joinNonEmpty(parts, "\n")
+}
+
+// FormatHierarchical returns a multi-line hierarchical representation of the position report
+// in the libacars display style. The indent string is prepended to each line.
+func (p *PositionReport) FormatHierarchical(indent string) string {
+	if p == nil {
+		return ""
+	}
+	var sb strings.Builder
+
+	// Current position.
+	if p.PosCurrent != nil {
+		if p.PosCurrent.Latitude != nil && p.PosCurrent.Longitude != nil {
+			sb.WriteString(indent + formatCoordLat(*p.PosCurrent.Latitude) + "\n")
+			sb.WriteString(indent + formatCoordLon(*p.PosCurrent.Longitude) + "\n")
+		} else if p.PosCurrent.Name != "" {
+			sb.WriteString(indent + "FIX: " + p.PosCurrent.Name + "\n")
+		}
+	}
+
+	// Time at current position (HH:MM).
+	if p.TimeAtPosCurrent != nil {
+		sb.WriteString(indent + "TIME AT CURRENT POSITION: " + p.TimeAtPosCurrent.String() + "\n")
+	}
+
+	// Altitude.
+	if p.Alt != nil {
+		sb.WriteString(indent + formatAltitudeHierarchical(p.Alt) + "\n")
+	}
+
+	// Next fix and its ETA.
+	if p.NextFix != nil {
+		sb.WriteString(indent + "NEXT FIX:\n")
+		sb.WriteString(indent + " FIX: " + p.NextFix.Name + "\n")
+	}
+	if p.EtaAtFixNext != nil {
+		sb.WriteString(indent + "ETA AT NEXT FIX: " + p.EtaAtFixNext.String() + "\n")
+	}
+
+	// Next+1 fix.
+	if p.NextNextFix != nil {
+		sb.WriteString(indent + "NEXT+1 FIX:\n")
+		sb.WriteString(indent + " FIX: " + p.NextNextFix.Name + "\n")
+	}
+
+	// ETA at destination.
+	if p.EtaAtDest != nil {
+		sb.WriteString(indent + "ETA AT DESTINATION: " + p.EtaAtDest.String() + "\n")
+	}
+
+	// Temperature.
+	if p.Temp != nil {
+		sb.WriteString(indent + fmt.Sprintf("TEMPERATURE: %d %s\n", int(p.Temp.Value), strings.ToUpper(p.Temp.Type)))
+	}
+
+	// Winds: direction and speed on separate lines.
+	if p.Winds != nil {
+		sb.WriteString(indent + fmt.Sprintf("WIND DIRECTION: %d DEG\n", p.Winds.Direction))
+		if p.Winds.Speed != nil {
+			sb.WriteString(indent + fmt.Sprintf("WIND SPEED: %d %s\n", p.Winds.Speed.Value, strings.ToUpper(p.Winds.Speed.Type)))
+		}
+	}
+
+	// Speed (e.g. Mach number).
+	if p.Speed != nil {
+		sb.WriteString(indent + formatSpeedHierarchical(p.Speed) + "\n")
+	}
+
+	// Ground speed (FANSGroundSpeedKnots, always in knots).
+	if p.SpeedGround != nil {
+		sb.WriteString(indent + fmt.Sprintf("SPEED GROUND: %d KTS\n", p.SpeedGround.Value))
+	}
+
+	// Vertical change (direction and rate).
+	if p.VertChange != nil {
+		sb.WriteString(indent + "VERTICAL CHANGE: " + p.VertChange.String() + "\n")
+	}
+
+	// Track angle.
+	if p.TrackAngle != nil {
+		typeStr := "TRUE"
+		if p.TrackAngle.Magnetic {
+			typeStr = "MAGNETIC"
+		}
+		sb.WriteString(indent + fmt.Sprintf("TRACK ANGLE: %d DEG %s\n", p.TrackAngle.Value, typeStr))
+	}
+
+	// True heading.
+	if p.TrueHeading != nil {
+		typeStr := "TRUE"
+		if p.TrueHeading.Magnetic {
+			typeStr = "MAGNETIC"
+		}
+		sb.WriteString(indent + fmt.Sprintf("TRUE HEADING: %d DEG %s\n", p.TrueHeading.Value, typeStr))
+	}
+
+	// Reported waypoint position, time, and altitude.
+	if p.ReportedWptPos != nil {
+		sb.WriteString(indent + "REPORTED WAYPOINT POSITION:\n")
+		sb.WriteString(indent + " FIX: " + p.ReportedWptPos.Name + "\n")
+	}
+	if p.ReportedWptTime != nil {
+		sb.WriteString(indent + "REPORTED WAYPOINT TIME: " + p.ReportedWptTime.String() + "\n")
+	}
+	if p.ReportedWptAlt != nil {
+		sb.WriteString(indent + "REPORTED WAYPOINT ALTITUDE:\n")
+		sb.WriteString(indent + " " + formatAltitudeHierarchical(p.ReportedWptAlt) + "\n")
+	}
+
+	return sb.String()
+}
+
+// formatAltitudeHierarchical returns a single-line libacars-style altitude label such as
+// "FLIGHT LEVEL: 320" or "ALTITUDE: 35000 FT".
+func formatAltitudeHierarchical(a *Altitude) string {
+	if a == nil {
+		return ""
+	}
+	switch a.Type {
+	case "flight_level":
+		return fmt.Sprintf("FLIGHT LEVEL: %d", a.Value)
+	case "feet":
+		return fmt.Sprintf("ALTITUDE: %d FT", a.Value)
+	case "meters":
+		return fmt.Sprintf("ALTITUDE: %d M", a.Value)
+	default:
+		return fmt.Sprintf("ALTITUDE: %d %s", a.Value, strings.ToUpper(a.Type))
+	}
+}
+
+// formatSpeedHierarchical returns a single-line libacars-style speed label such as
+// "MACH NUMBER: 0.83" or "SPEED: 250 KTS".
+func formatSpeedHierarchical(s *Speed) string {
+	if s == nil {
+		return ""
+	}
+	switch s.Type {
+	case "mach":
+		// Value is Mach * 100 (e.g. 83 → M.83).
+		return fmt.Sprintf("MACH NUMBER: 0.%02d", s.Value)
+	case "knots":
+		return fmt.Sprintf("SPEED: %d KTS", s.Value)
+	case "kph":
+		return fmt.Sprintf("SPEED: %d KPH", s.Value)
+	default:
+		return fmt.Sprintf("SPEED: %d %s", s.Value, strings.ToUpper(s.Type))
+	}
 }
 
 func joinNonEmpty(parts []string, sep string) string {
@@ -454,4 +669,194 @@ func (v *VerticalRate) String() string {
 		return ""
 	}
 	return fmt.Sprintf("%d ft/min", v.Value)
+}
+
+// VerticalChange represents a FANSVerticalChange: a direction (up/down) and an optional rate.
+type VerticalChange struct {
+	Direction string       `json:"direction"`         // "up" or "down"
+	Rate      *VerticalRate `json:"rate,omitempty"`
+}
+
+func (vc *VerticalChange) String() string {
+	if vc == nil {
+		return ""
+	}
+	if vc.Rate == nil {
+		return vc.Direction
+	}
+	return fmt.Sprintf("%s %s", vc.Direction, vc.Rate.String())
+}
+
+// formatCoordLat formats a decimal latitude into the libacars-style display format.
+// Whole-degree values are rendered as "LATITUDE:   dd DEG NORTH/SOUTH".
+// Sub-degree values are rendered as "LATITUDE:   dd mm.m NORTH/SOUTH".
+func formatCoordLat(lat float64) string {
+	direction := "NORTH"
+	if lat < 0 {
+		direction = "SOUTH"
+		lat = -lat
+	}
+	degrees := int(lat)
+	minutes := (lat - float64(degrees)) * 60.0
+	if math.Abs(minutes) < 0.05 {
+		return fmt.Sprintf("LATITUDE: %4d DEG %s", degrees, direction)
+	}
+	return fmt.Sprintf("LATITUDE: %4d %4.1f %s", degrees, minutes, direction)
+}
+
+// formatCoordLon formats a decimal longitude into the libacars-style display format.
+// Whole-degree values are rendered as "LONGITUDE: ddd DEG EAST/WEST".
+// Sub-degree values are rendered as "LONGITUDE: ddd mm.m EAST/WEST".
+func formatCoordLon(lon float64) string {
+	direction := "EAST"
+	if lon < 0 {
+		direction = "WEST"
+		lon = -lon
+	}
+	degrees := int(lon)
+	minutes := (lon - float64(degrees)) * 60.0
+	if math.Abs(minutes) < 0.05 {
+		return fmt.Sprintf("LONGITUDE: %03d DEG %s", degrees, direction)
+	}
+	return fmt.Sprintf("LONGITUDE: %03d %4.1f %s", degrees, minutes, direction)
+}
+
+// FormatHierarchical returns a multi-line hierarchical representation of the route clearance.
+// The indent string is prepended to each top-level line; sub-items use indent with one additional space.
+func (r *RouteClearance) FormatHierarchical(indent string) string {
+	if r == nil {
+		return ""
+	}
+	sub := indent + " "
+	var sb strings.Builder
+
+	if r.AirportDeparture != "" {
+		sb.WriteString(indent + "DEPARTURE AIRPORT: " + r.AirportDeparture + "\n")
+	}
+	if r.AirportDestination != "" {
+		sb.WriteString(indent + "DESTINATION AIRPORT: " + r.AirportDestination + "\n")
+	}
+	if r.RunwayDeparture != nil {
+		sb.WriteString(indent + "DEPARTURE RUNWAY:\n")
+		sb.WriteString(sub + fmt.Sprintf("RUNWAY DIRECTION: %d\n", r.RunwayDeparture.Direction))
+		if r.RunwayDeparture.Configuration != "none" && r.RunwayDeparture.Configuration != "" {
+			sb.WriteString(sub + "RUNWAY CONFIGURATION: " + strings.ToUpper(r.RunwayDeparture.Configuration) + "\n")
+		}
+	}
+	if r.ProcedureDeparture != nil {
+		sb.WriteString(indent + "DEPARTURE PROCEDURE:\n")
+		sb.WriteString(r.ProcedureDeparture.FormatHierarchical(sub))
+	}
+	if r.RunwayArrival != nil {
+		sb.WriteString(indent + "ARRIVAL RUNWAY:\n")
+		sb.WriteString(sub + fmt.Sprintf("RUNWAY DIRECTION: %d\n", r.RunwayArrival.Direction))
+		if r.RunwayArrival.Configuration != "none" && r.RunwayArrival.Configuration != "" {
+			sb.WriteString(sub + "RUNWAY CONFIGURATION: " + strings.ToUpper(r.RunwayArrival.Configuration) + "\n")
+		}
+	}
+	if r.ProcedureApproach != nil {
+		sb.WriteString(indent + "APPROACH PROCEDURE:\n")
+		sb.WriteString(r.ProcedureApproach.FormatHierarchical(sub))
+	}
+	if r.ProcedureArrival != nil {
+		sb.WriteString(indent + "ARRIVAL PROCEDURE:\n")
+		sb.WriteString(r.ProcedureArrival.FormatHierarchical(sub))
+	}
+	if r.AirwayIntercept != "" {
+		sb.WriteString(indent + "AIRWAY INTERCEPT: " + r.AirwayIntercept + "\n")
+	}
+	if len(r.RouteInformation) > 0 {
+		sb.WriteString(indent + "ROUTE:\n")
+		for _, elem := range r.RouteInformation {
+			sb.WriteString(elem.FormatHierarchical(sub))
+		}
+	}
+	if len(r.RouteInfoAdditional) > 0 {
+		sb.WriteString(indent + "ROUTE ADDITIONAL CONSTRAINTS:\n")
+		for _, w := range r.RouteInfoAdditional {
+			w := w
+			sb.WriteString(w.FormatHierarchical(sub))
+		}
+	}
+	return sb.String()
+}
+
+// isValidProcedureIdentifier returns true if the string contains only alphanumeric characters
+// (A–Z, 0–9). Procedure names and transitions must be alphanumeric; non-alphanumeric characters
+// indicate a decode error in the bit stream.
+func isValidProcedureIdentifier(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, ch := range s {
+		if !((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')) {
+			return false
+		}
+	}
+	return true
+}
+
+// FormatHierarchical returns a multi-line hierarchical representation of a procedure name.
+// The indent string is prepended to each line. Procedure names or transitions containing
+// non-alphanumeric characters are omitted, as they indicate a bit-level decode error.
+func (p *ProcedureName) FormatHierarchical(indent string) string {
+	if p == nil {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString(indent + "PROCEDURE TYPE: " + strings.ToUpper(p.Type) + "\n")
+	if isValidProcedureIdentifier(p.Name) {
+		sb.WriteString(indent + "PROCEDURE NAME: " + p.Name + "\n")
+	}
+	if p.Transition != "" && isValidProcedureIdentifier(p.Transition) {
+		sb.WriteString(indent + "PROCEDURE TRANSITION: " + p.Transition + "\n")
+	}
+	return sb.String()
+}
+
+// FormatHierarchical returns a multi-line hierarchical representation of a route information element.
+// The indent string is prepended to each top-level line; sub-items use indent with one additional space.
+func (r RouteInformationElement) FormatHierarchical(indent string) string {
+	sub := indent + " "
+	var sb strings.Builder
+	switch r.Kind {
+	case "latlon":
+		if r.Position != nil && r.Position.Latitude != nil && r.Position.Longitude != nil {
+			sb.WriteString(indent + formatCoordLat(*r.Position.Latitude) + "\n")
+			sb.WriteString(indent + formatCoordLon(*r.Position.Longitude) + "\n")
+		}
+	case "published_identifier":
+		sb.WriteString(indent + "PUBLISHED IDENTIFIER:\n")
+		if r.Position != nil {
+			if r.Position.Name != "" {
+				sb.WriteString(sub + "FIX: " + r.Position.Name + "\n")
+			}
+			if r.Position.Latitude != nil {
+				sb.WriteString(sub + formatCoordLat(*r.Position.Latitude) + "\n")
+			}
+			if r.Position.Longitude != nil {
+				sb.WriteString(sub + formatCoordLon(*r.Position.Longitude) + "\n")
+			}
+		}
+	case "airway":
+		sb.WriteString(indent + "AIRWAY ID: " + r.Airway + "\n")
+	case "place_bearing_distance":
+		if r.Position != nil {
+			sb.WriteString(indent + "PLACE BEARING DISTANCE:\n")
+			if r.Position.Name != "" {
+				sb.WriteString(sub + "FIX: " + r.Position.Name + "\n")
+			}
+			if r.Position.Bearing != nil {
+				sb.WriteString(sub + fmt.Sprintf("BEARING: %d\n", *r.Position.Bearing))
+			}
+			if r.Position.Distance != nil {
+				sb.WriteString(sub + fmt.Sprintf("DISTANCE: %d %s\n", *r.Position.Distance, strings.ToUpper(r.Position.DistanceUnit)))
+			}
+		}
+	default:
+		if r.Text != "" {
+			sb.WriteString(indent + r.Text + "\n")
+		}
+	}
+	return sb.String()
 }
