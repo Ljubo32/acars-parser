@@ -1133,13 +1133,14 @@ function updateLoadsheetStats() {
   const withTOW = entries.filter(e => e.ls.tow > 0);
   const withTOF = entries.filter(e => e.ls.tof > 0);
 
-  // Load factor score: passengers per tonne of trip fuel.
-  // A higher ratio means more passengers are carried for each tonne of fuel
-  // burned — i.e. the flight is commercially efficient.  A lower ratio means
-  // the aircraft is carrying little payload relative to its fuel burn.
-  // Only entries with both PAX and TIF available participate.
-  const withScore = entries.filter(e => e.ls.pax > 0 && e.ls.tif > 0);
-  function loadScore(e) { return e.ls.pax / (e.ls.tif / 1000); }
+  // Load factor score: passengers per tonne of fuel.
+  // TIF (trip fuel — fuel actually burned) is preferred over TOF (take-off
+  // fuel, which includes reserves/contingency) because it gives a truer
+  // picture of commercial efficiency.  Messages parsed before TIF extraction
+  // was introduced fall back to TOF so that the columns are not silently empty.
+  function tripFuel(e) { return e.ls.tif || e.ls.tof; }
+  const withScore = entries.filter(e => e.ls.pax > 0 && tripFuel(e) > 0);
+  function loadScore(e) { return e.ls.pax / (tripFuel(e) / 1000); }
   function fmtScore(e)  { return loadScore(e).toFixed(1) + '\u202fpax/t'; }
 
   const maxPAX    = dedupeByLabel([...withPAX].sort((a, b) => b.ls.pax - a.ls.pax)).slice(0, LS_TOP_N);
